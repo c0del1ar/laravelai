@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from typing import Any, Dict, List, Optional, Set
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field
 
@@ -23,6 +23,7 @@ SITE_PUBLIC_URL = os.getenv("SITE_PUBLIC_URL", "")    # public:   https://aryaku
 CRAWL_TTL = int(os.getenv("CRAWL_TTL", str(60 * 60 * 6)))  # re-crawl every 6 hours
 CRAWL_MAX_PAGES = int(os.getenv("CRAWL_MAX_PAGES", "60"))
 CRAWL_TIMEOUT = int(os.getenv("CRAWL_TIMEOUT", "8"))
+OPENCLAW_WEBHOOK_KEY = os.getenv("OPENCLAW_WEBHOOK_KEY", "")
 
 
 # ── HTML text extractor ───────────────────────────────────────────────────────
@@ -245,6 +246,7 @@ app = FastAPI(title="Website AI API", lifespan=lifespan)
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     history: List[Dict[str, Any]] = Field(default_factory=list)
+    user_id: Optional[str] = None
 
 
 @app.get("/health")
@@ -618,21 +620,20 @@ def _not_found(language: str) -> Dict:
 
 
 # ── Main endpoint ─────────────────────────────────────────────────────────────
-@app.post("/v1/chat")
-async def chat(req: ChatRequest):
+async def generate_chat_response(message: str, history: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not GROQ_API_KEY:
         raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured")
 
-    language = detect_language(req.message, req.history)
+    language = detect_language(message, history)
 
     # Trigger background re-crawl if stale (non-blocking)
     if kb.is_stale:
         asyncio.create_task(kb.crawl())
 
     # Owner query — skip search entirely
-    if is_owner_query(req.message):
+    if is_owner_query(message):
         try:
-            return await ask_groq_owner(req.message, req.history, language)
+            return await ask_groq_owner(message, history, language)
         except Exception:
             return _not_found(language)
 
@@ -640,7 +641,7 @@ async def chat(req: ChatRequest):
         raise HTTPException(status_code=500, detail="SEARCH_API_URL is not configured")
 
     # Build search query
-    search_query = build_search_query(req.message, req.history)
+    search_query = build_search_query(message, history)
 
     # Fetch search results + build rich context from crawled pages
     search_items = await search_website(search_query)
@@ -648,9 +649,98 @@ async def chat(req: ChatRequest):
 
     # Ask Groq with full page context
     try:
-        return await ask_groq_navigate(req.message, req.history, context_pages, language)
+        return await ask_groq_navigate(message, history, context_pages, language)
     except httpx.HTTPStatusError as e:
         detail = e.response.text if e.response is not None else str(e)
         raise HTTPException(status_code=502, detail=f"Groq error: {detail}")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI error: {str(e)}")
+
+
+def _extract_first_non_empty(payload: Dict[str, Any], candidates: List[str]) -> str:
+    for path in candidates:
+        value = str(_get_nested(payload, path)).strip()
+        if value:
+            return value
+    return ""
+
+
+def _get_nested(payload: Dict[str, Any], path: str) -> Any:
+    current: Any = payload
+    for part in path.split("."):
+        if not isinstance(current, dict):
+            return ""
+        current = current.get(part, "")
+    return current
+
+
+def extract_openclaw_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    message = _extract_first_non_empty(payload, [
+        "message",
+        "text",
+        "content",
+        "data.message",
+        "data.text",
+        "event.message.text",
+        "event.text",
+    ])
+
+    user_id = _extract_first_non_empty(payload, [
+        "user_id",
+        "sender_id",
+        "from",
+        "user.id",
+        "sender.id",
+        "data.user_id",
+        "data.sender_id",
+        "data.user.id",
+        "data.sender.id",
+    ])
+
+    source_history = payload.get("history", payload.get("messages", []))
+    history: List[Dict[str, str]] = []
+    if isinstance(source_history, list):
+        for item in source_history:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role", "")).strip()
+            content = str(item.get("content", item.get("text", ""))).strip()
+            if role in {"user", "assistant"} and content:
+                history.append({"role": role, "content": content})
+
+    return {
+        "message": message,
+        "history": history,
+        "user_id": user_id or None,
+    }
+
+
+@app.post("/v1/chat")
+async def chat(req: ChatRequest):
+    return await generate_chat_response(req.message, req.history)
+
+
+@app.post("/v1/openclaw")
+async def openclaw_chat(request: Request, payload: Dict[str, Any]):
+    if OPENCLAW_WEBHOOK_KEY:
+        provided_key = request.headers.get("x-openclaw-key", "")
+        if not provided_key or provided_key != OPENCLAW_WEBHOOK_KEY:
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+    data = extract_openclaw_payload(payload)
+    message = str(data["message"]).strip()
+    if not message:
+        raise HTTPException(status_code=422, detail="Invalid payload: message is required")
+
+    ai_result = await generate_chat_response(message, data["history"])
+    reply = str(ai_result.get("answer", "")).strip()
+
+    return {
+        "ok": True,
+        "reply": reply,
+        "text": reply,
+        "message": reply,
+        "response": reply,
+        "ai": ai_result,
+        "user_id": data["user_id"],
+    }

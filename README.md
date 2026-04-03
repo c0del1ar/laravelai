@@ -4,6 +4,7 @@ Pola yang dipakai:
 
 - Browser -> Laravel `/api/ai/chat`
 - Laravel -> FastAPI internal (`http://ai_fastapi:8008`)
+- OpenClaw (WA/Telegram/Discord) -> FastAPI internal (`http://ai_fastapi:8008/v1/openclaw`)
 - FastAPI -> Laravel internal search (`http://laravel_franken:8000/api/internal/ai/search`)
 - FastAPI -> Groq API (LLM response)
 
@@ -25,9 +26,12 @@ Pola yang dipakai:
    - pastikan `AI_SHARED_NETWORK` sama dengan `AI_SHARED_NETWORK` di project Laravel
    - pastikan `SEARCH_API_URL=http://laravel_franken:8000/api/internal/ai/search`
    - samakan `SEARCH_API_KEY` dengan `AI_INTERNAL_SEARCH_KEY` di Laravel
+   - set `OPENCLAW_WEBHOOK_KEY` (opsional tapi disarankan, untuk header `X-OpenClaw-Key`)
+   - jika mau jalankan OpenClaw container di stack ini, set `OPENCLAW_IMAGE` sesuai image OpenClaw yang kamu pakai
    - `docker compose up -d --build`
 
 4. Jalankan website compose.
+5. (Opsional) Jalankan OpenClaw terpisah: `docker compose --profile openclaw up -d`
 
 ## Catatan
 
@@ -47,6 +51,35 @@ fetch('/api/ai/chat', {
   body: JSON.stringify({ message, history })
 })
 ```
+
+## OpenClaw ke AI core (tanpa Laravel)
+
+Endpoint AI untuk OpenClaw:
+
+```http
+POST /v1/openclaw
+X-OpenClaw-Key: <OPENCLAW_WEBHOOK_KEY>
+Content-Type: application/json
+```
+
+Endpoint ini ada di container FastAPI (`ai_fastapi:8008`), jadi alurnya langsung:
+`OpenClaw -> ai_fastapi (/v1/openclaw) -> Groq + search website`.
+
+Payload minimum:
+
+```json
+{
+  "message": "Halo, ada promo apa?"
+}
+```
+
+Field lain yang juga didukung untuk kompatibilitas:
+
+- pesan: `text`, `content`, `data.message`, `data.text`, `event.message.text`
+- user id: `user_id`, `sender_id`, `from`, `user.id`, `sender.id`, `data.user_id`, `data.sender_id`
+- riwayat: `history` atau `messages` (`[{role: user|assistant, content|text: "..."}]`)
+
+Response sukses akan mengirim `reply`, `text`, `message`, dan `response` (isi sama) + payload `ai` mentah.
 
 ## Penting
 
