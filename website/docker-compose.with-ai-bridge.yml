@@ -1,0 +1,104 @@
+version: '3.8'
+
+services:
+  laravel_franken:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: image_laravel_franken
+    ports:
+      - "31103:8000"
+    restart: always
+    init: true
+    networks:
+      - app-network
+      - ai-bridge
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      DB_HOST: db
+      DB_PORT: 3306
+      LOG_CHANNEL: stderr
+      OCTANE_STATE_FILE: /tmp/octane-server-state.json
+      AI_API_BASE_URL: ${AI_API_BASE_URL:-http://ai_fastapi:8008}
+      AI_API_TIMEOUT: ${AI_API_TIMEOUT:-90}
+      AI_INTERNAL_SEARCH_KEY: ${AI_INTERNAL_SEARCH_KEY:-change-this-long-random-key}
+    volumes:
+      - laravel_storage:/var/www/storage
+      - ./public/assets/img:/var/www/public/assets/img
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    healthcheck:
+      test: ["CMD-SHELL", "php -r \"exit((int) (file_get_contents('http://127.0.0.1:8000/up') === false));\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  db:
+    image: mariadb:10.11
+    restart: always
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE:-laravel_app}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-change-me}
+      MYSQL_USER: ${DB_USERNAME:-laravel}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-change-me}
+    ports:
+      - "3307:3306"
+    volumes:
+      - dbdata:/var/lib/mysql
+      - ./db_backups:/db_backups
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  db_backup:
+    image: mariadb:10.11
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_DATABASE: ${DB_DATABASE:-laravel_app}
+      DB_USERNAME: ${DB_USERNAME:-laravel}
+      DB_PASSWORD: ${DB_PASSWORD:-change-me}
+      BACKUP_DIR: /db_backups
+      BACKUP_INTERVAL_SECONDS: ${DB_BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_RETENTION_DAYS: ${DB_BACKUP_RETENTION_DAYS:-14}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./db_backups:/db_backups
+      - ./docker/db/backup.sh:/usr/local/bin/backup.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/backup.sh"]
+    networks:
+      - app-network
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+networks:
+  app-network:
+    driver: bridge
+  ai-bridge:
+    external: true
+    name: ${AI_SHARED_NETWORK:-ai_bridge_local}
+
+volumes:
+  dbdata:
+    driver: local
+  laravel_storage:
+    driver: local

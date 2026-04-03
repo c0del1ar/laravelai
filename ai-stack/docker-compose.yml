@@ -1,0 +1,21 @@
+services:
+  ai_fastapi:
+    build: ./ai-api
+    container_name: ai_fastapi
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SEARCH_API_URL: ${SEARCH_API_URL}
+      SEARCH_API_KEY: ${SEARCH_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.1-8b-instant}
+    expose:
+      - "8008"
+    networks:
+      - ai_edge
+
+networks:
+  ai_edge:
+    external: true
+    name: ${AI_SHARED_NETWORK:-ai_bridge_local}

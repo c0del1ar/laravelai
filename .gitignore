@@ -1,0 +1,38 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+website/.env
+ai-stack/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+
+# Laravel / PHP dependencies and runtime files
+website/vendor/
+website/node_modules/
+website/storage/*.key
+website/storage/logs/
+website/storage/framework/cache/
+website/storage/framework/sessions/
+website/storage/framework/testing/
+website/storage/framework/views/
+website/bootstrap/cache/*.php
+
+# Project runtime artifacts
+website/db_backups/
