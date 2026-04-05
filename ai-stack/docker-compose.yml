@@ -1,6 +1,8 @@
 services:
   ai_fastapi:
-    build: ./ai-api
+    build:
+      context: ./ai-api
+      dockerfile: Dockerfile
     container_name: ai_fastapi
     restart: unless-stopped
     env_file:
@@ -8,16 +10,22 @@ services:
     environment:
       SEARCH_API_URL: ${SEARCH_API_URL}
       SEARCH_API_KEY: ${SEARCH_API_KEY}
+      TOOL_MANIFEST_API_URL: ${TOOL_MANIFEST_API_URL:-}
       GROQ_API_KEY: ${GROQ_API_KEY}
       GROQ_MODEL: ${GROQ_MODEL:-llama-3.1-8b-instant}
+      KB_CACHE_PATH: ${KB_CACHE_PATH:-/var/lib/ai_fastapi/kb_cache.json}
       OPENCLAW_WEBHOOK_KEY: ${OPENCLAW_WEBHOOK_KEY:-}
+      OPENCLAW_COMPAT_API_KEY: ${OPENCLAW_COMPAT_API_KEY:-}
+      OPENCLAW_COMPAT_MODEL_ID: ${OPENCLAW_COMPAT_MODEL_ID:-xiao-an}
     expose:
       - "8008"
+    volumes:
+      - ai_fastapi_data:/var/lib/ai_fastapi
     networks:
       - ai_edge
 
   # Optional: jalankan dengan `docker compose --profile openclaw up -d`
-  # OpenClaw berdiri sendiri dan memanggil AI core langsung ke /v1/openclaw.
+  # OpenClaw berdiri sendiri dan memanggil AI core via OpenAI-compatible API FastAPI.
   openclaw:
     image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
     restart: unless-stopped
@@ -25,8 +33,8 @@ services:
     env_file:
       - .env
     environment:
-      OPENCLAW_AI_ENDPOINT: ${OPENCLAW_AI_ENDPOINT:-http://ai_fastapi:8008/v1/openclaw}
-      OPENCLAW_AI_KEY: ${OPENCLAW_WEBHOOK_KEY:-}
+      OPENCLAW_COMPAT_API_KEY: ${OPENCLAW_COMPAT_API_KEY:-}
+      OPENCLAW_COMPAT_MODEL_ID: ${OPENCLAW_COMPAT_MODEL_ID:-xiao-an}
       TZ: ${TZ:-Asia/Jakarta}
     depends_on:
       - ai_fastapi
@@ -37,3 +45,7 @@ networks:
   ai_edge:
     external: true
     name: ${AI_SHARED_NETWORK:-ai_bridge_local}
+
+volumes:
+  ai_fastapi_data:
+    driver: local
