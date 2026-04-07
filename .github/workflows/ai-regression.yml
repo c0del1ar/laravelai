@@ -1,0 +1,92 @@
+name: AI Regression
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+jobs:
+  compile-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile Python modules
+        run: make eval-compile
+
+  eval:
+    runs-on: ubuntu-latest
+    needs: compile-check
+    if: ${{ secrets.GROQ_API_KEY != '' }}
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      SITE_BASE_URL: https://aryakun.id
+      SITE_PUBLIC_URL: https://aryakun.id
+      SEARCH_API_URL: ""
+      SEARCH_API_KEY: ""
+      TOOL_MANIFEST_API_URL: ""
+      INTERNAL_INDEX_KEY: ci-index-key
+      APP_LOG_LEVEL: INFO
+      KB_CACHE_PATH: /tmp/ai_fastapi_kb_cache.json
+      VECTOR_DB_PATH: /tmp/ai_fastapi_vector_store.db
+      MEMORY_STORE_PATH: /tmp/ai_fastapi_memory_store.json
+      LEARNING_STORE_PATH: /tmp/ai_fastapi_learning_store.json
+      RESPONSE_CACHE_PATH: /tmp/ai_fastapi_response_cache.json
+      OPENCLAW_PREFIX_GATE_STORE_PATH: /tmp/ai_fastapi_openclaw_prefix_gate.json
+      HUMAN_HANDOFF_STATE_PATH: /tmp/ai_fastapi_handoff_state.json
+      EVAL_MIN_SCORE: "0.66"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r ai-stack/ai-api/requirements.txt
+
+      - name: Start AI API
+        run: |
+          cd ai-stack/ai-api
+          nohup uvicorn app.main:app --host 127.0.0.1 --port 8008 >/tmp/ai_fastapi.log 2>&1 &
+          echo $! >/tmp/ai_fastapi.pid
+
+      - name: Wait for health endpoint
+        run: |
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8008/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "AI API health check timeout"
+          exit 1
+
+      - name: Run regression eval
+        run: make eval EVAL_BASE_URL=http://127.0.0.1:8008 EVAL_MIN_SCORE=${EVAL_MIN_SCORE}
+
+      - name: Upload eval artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-eval-report
+          path: |
+            ai-stack/evals/eval_report.json
+            /tmp/ai_fastapi.log
+          if-no-files-found: warn
+
+      - name: Stop AI API
+        if: always()
+        run: |
+          if [ -f /tmp/ai_fastapi.pid ]; then
+            kill "$(cat /tmp/ai_fastapi.pid)" || true
+          fi

@@ -73,6 +73,7 @@ class AiToolManifestService
         }, $fields)));
 
         $steps = $this->buildSteps($tool, $fieldSpecs, $settings);
+        $playbook = $this->buildPlaybook($tool, $fieldSpecs, $settings, $steps);
 
         $outputExplained = (string) data_get($settings, 'ai_manifest.output_explained', '');
         if ($outputExplained === '') {
@@ -120,6 +121,7 @@ class AiToolManifestService
                 'fields' => $fieldSpecs,
             ],
             'steps' => $steps,
+            'playbook' => $playbook,
             'output_explained' => $outputExplained,
             'faq' => $faq,
             'error_cases' => $errorCases,
@@ -157,5 +159,69 @@ class AiToolManifestService
         $steps[] = 'Review the output section and copy/download the result as needed.';
 
         return $steps;
+    }
+
+    private function buildPlaybook(Tool $tool, array $fields, array $settings, array $steps): array
+    {
+        $fromSettings = data_get($settings, 'ai_playbook', []);
+        $fromSettings = is_array($fromSettings) ? $fromSettings : [];
+
+        $whatItDoes = (string) ($fromSettings['what_it_does'] ?? '');
+        if ($whatItDoes === '') {
+            $whatItDoes = (string) ($tool->description ?? '');
+        }
+
+        $inputTips = $fromSettings['input_tips'] ?? [];
+        if (! is_array($inputTips) || $inputTips === []) {
+            $inputTips = $this->defaultInputTips($fields);
+        } else {
+            $inputTips = array_values(array_map(fn ($v) => (string) $v, $inputTips));
+        }
+
+        $exampleInput = $fromSettings['example_input'] ?? [];
+        $exampleInput = is_array($exampleInput) ? $exampleInput : [];
+
+        $troubleshooting = $fromSettings['troubleshooting'] ?? [];
+        if (! is_array($troubleshooting) || $troubleshooting === []) {
+            $troubleshooting = [
+                'Pastikan field wajib terisi sesuai format.',
+                'Jika hasil kosong, coba input lebih spesifik.',
+                'Jika proses gagal, refresh halaman dan ulangi dengan data baru.',
+            ];
+        } else {
+            $troubleshooting = array_values(array_map(fn ($v) => (string) $v, $troubleshooting));
+        }
+
+        $shortcut = $fromSettings['shortcut'] ?? [];
+        $shortcut = is_array($shortcut) ? $shortcut : [];
+
+        return [
+            'what_it_does' => $whatItDoes,
+            'steps' => $steps,
+            'input_tips' => $inputTips,
+            'example_input' => $exampleInput,
+            'troubleshooting' => $troubleshooting,
+            'shortcut' => $shortcut,
+        ];
+    }
+
+    private function defaultInputTips(array $fields): array
+    {
+        $tips = [];
+        foreach ($fields as $field) {
+            $label = trim((string) ($field['label'] ?? $field['key'] ?? 'Input'));
+            $type = trim((string) ($field['type'] ?? 'text'));
+            $required = (bool) ($field['required'] ?? false);
+            $tip = $label . ': gunakan format ' . $type;
+            if ($required) {
+                $tip .= ' dan wajib diisi';
+            }
+            $tips[] = $tip . '.';
+            if (count($tips) >= 8) {
+                break;
+            }
+        }
+
+        return $tips;
     }
 }

@@ -28,6 +28,8 @@ services:
       AI_API_BASE_URL: ${AI_API_BASE_URL:-http://ai_fastapi:8008}
       AI_API_TIMEOUT: ${AI_API_TIMEOUT:-90}
       AI_INTERNAL_SEARCH_KEY: ${AI_INTERNAL_SEARCH_KEY:-change-this-long-random-key}
+      AI_INTERNAL_INDEX_KEY: ${AI_INTERNAL_INDEX_KEY:-change-this-long-random-key}
+      AI_INDEX_ENDPOINT: ${AI_INDEX_ENDPOINT:-/admin/index/changed}
     volumes:
       - laravel_storage:/var/www/storage
       - ./public/assets/img:/var/www/public/assets/img

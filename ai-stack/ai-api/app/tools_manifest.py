@@ -17,6 +17,65 @@ _manifest_cache: Dict[str, Any] = {
 }
 
 
+def _normalize_manifest_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    source = dict(item) if isinstance(item, dict) else {}
+    playbook = source.get("playbook", {})
+    playbook = playbook if isinstance(playbook, dict) else {}
+    hook = source.get("hook", {})
+    hook = hook if isinstance(hook, dict) else {}
+    input_schema = source.get("input_schema", {})
+    input_schema = input_schema if isinstance(input_schema, dict) else {}
+    fields = input_schema.get("fields", [])
+    fields = fields if isinstance(fields, list) else []
+    clean_fields: List[Dict[str, Any]] = []
+    for field in fields[:30]:
+        if not isinstance(field, dict):
+            continue
+        clean_fields.append(
+            {
+                "key": str(field.get("key", "")).strip(),
+                "label": str(field.get("label", "")).strip(),
+                "type": str(field.get("type", "text")).strip() or "text",
+                "required": bool(field.get("required", False)),
+                "placeholder": str(field.get("placeholder", "")).strip(),
+                "hint": str(field.get("hint", "")).strip(),
+            }
+        )
+
+    steps = source.get("steps", [])
+    steps = [str(v).strip() for v in steps if str(v).strip()] if isinstance(steps, list) else []
+    pb_steps = playbook.get("steps", [])
+    pb_steps = [str(v).strip() for v in pb_steps if str(v).strip()] if isinstance(pb_steps, list) else []
+    merged_steps = list(dict.fromkeys((steps + pb_steps)))[:14]
+
+    return {
+        "slug": str(source.get("slug", "")).strip(),
+        "name": str(source.get("name", "")).strip(),
+        "url": str(source.get("url", "")).strip(),
+        "description": str(source.get("description", "")).strip(),
+        "category": str(source.get("category", "")).strip(),
+        "input_schema": {"fields": clean_fields},
+        "steps": merged_steps,
+        "output_explained": str(source.get("output_explained", "")).strip(),
+        "playbook": {
+            "what_it_does": str(playbook.get("what_it_does", "")).strip(),
+            "input_tips": [str(v).strip() for v in (playbook.get("input_tips", []) or []) if str(v).strip()][:16],
+            "troubleshooting": [str(v).strip() for v in (playbook.get("troubleshooting", []) or []) if str(v).strip()][:16],
+        },
+        "hook": {
+            "tips": [str(v).strip() for v in (hook.get("tips", []) or []) if str(v).strip()][:16],
+            "examples": [
+                {
+                    "label": str((example or {}).get("label", "")).strip(),
+                    "value": str((example or {}).get("value", "")).strip(),
+                }
+                for example in (hook.get("examples", []) or [])[:16]
+                if isinstance(example, dict)
+            ],
+        },
+    }
+
+
 def _manifest_to_search_text(item: Dict[str, Any]) -> str:
     parts: List[str] = [
         str(item.get("slug", "")),
@@ -38,6 +97,25 @@ def _manifest_to_search_text(item: Dict[str, Any]) -> str:
 
     for step in (item.get("steps", []) if isinstance(item.get("steps", []), list) else [])[:10]:
         parts.append(str(step))
+
+    playbook = item.get("playbook", {})
+    if isinstance(playbook, dict):
+        parts.append(str(playbook.get("what_it_does", "")))
+        for step in (playbook.get("steps", []) if isinstance(playbook.get("steps", []), list) else [])[:10]:
+            parts.append(str(step))
+        for tip in (playbook.get("input_tips", []) if isinstance(playbook.get("input_tips", []), list) else [])[:12]:
+            parts.append(str(tip))
+        for issue in (playbook.get("troubleshooting", []) if isinstance(playbook.get("troubleshooting", []), list) else [])[:12]:
+            parts.append(str(issue))
+
+    hook = item.get("hook", {})
+    if isinstance(hook, dict):
+        for tip in (hook.get("tips", []) if isinstance(hook.get("tips", []), list) else [])[:12]:
+            parts.append(str(tip))
+        for example in (hook.get("examples", []) if isinstance(hook.get("examples", []), list) else [])[:12]:
+            if isinstance(example, dict):
+                parts.append(str(example.get("label", "")))
+                parts.append(str(example.get("value", "")))
 
     return normalize_text(" ".join(parts))
 
@@ -97,7 +175,7 @@ async def fetch_tools_manifest(force: bool = False) -> List[Dict[str, Any]]:
 
         items = payload.get("items", []) if isinstance(payload, dict) else []
         items = items if isinstance(items, list) else []
-        normalized = [item for item in items if isinstance(item, dict)]
+        normalized = [_normalize_manifest_item(item) for item in items if isinstance(item, dict)]
 
         _manifest_cache["items"] = normalized
         _manifest_cache["loaded_at"] = time.time()
@@ -127,7 +205,7 @@ async def fetch_tool_manifest_by_slug(slug: str) -> Optional[Dict[str, Any]]:
             resp.raise_for_status()
             payload = resp.json()
             if isinstance(payload, dict):
-                return payload
+                return _normalize_manifest_item(payload)
     except Exception:
         return None
 
@@ -146,4 +224,4 @@ async def find_relevant_tool_manifests(query: str, top_k: int = 3) -> List[Dict[
             scored.append((score, item))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [dict(item) for _, item in scored[:top_k]]
+    return [_normalize_manifest_item(item) for _, item in scored[:top_k]]

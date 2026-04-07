@@ -1,6 +1,7 @@
 import re
 from typing import Any, Dict, List, Optional, Set
 
+from .config import GLOSSARY_EXPANSION_ENABLED, GLOSSARY_MAX_TERMS, HUMAN_HANDOFF_KEYWORDS
 from .html_utils import tokenize_for_search
 
 
@@ -19,12 +20,24 @@ ENGLISH_MARKERS = [
     "find", "need", "want", "about", "explain", "price", "use", "for",
     "can", "could", "show", "article", "blog", "tool", "product",
 ]
+ENGLISH_VERB_MARKERS = [
+    "is", "are", "was", "were", "do", "does", "did", "can", "should", "would", "will", "have", "has",
+]
 QUERY_STOPWORDS = {
     "yang", "dan", "atau", "untuk", "dari", "dengan", "ke", "di", "itu", "ini", "apa", "siapa",
     "saya", "aku", "kamu", "anda", "kami", "kita", "lah", "dong", "please", "tolong", "bantu",
     "what", "who", "how", "why", "where", "when", "is", "are", "the", "this", "that", "and",
     "or", "to", "for", "of", "in", "on", "a", "an", "can", "could", "would", "should",
     "about", "tell", "me", "you", "your", "my",
+}
+
+MULTILINGUAL_GLOSSARY: Dict[str, List[str]] = {
+    "pricing": ["harga", "paket", "plan", "biaya", "subscription", "langganan"],
+    "contact": ["kontak", "hubungi", "support", "cs", "whatsapp", "email", "telegram", "discord"],
+    "tools": ["alat", "checker", "tool", "utilities", "noredirect", "redirect"],
+    "blog": ["artikel", "post", "tulisan", "insight", "panduan", "guide"],
+    "feature": ["fitur", "fungsi", "capability", "keunggulan"],
+    "about": ["tentang", "about", "profile", "siapa aryakun"],
 }
 
 
@@ -37,6 +50,11 @@ def detect_language(message: str, history: Optional[List[Dict]] = None) -> str:
     text = f" {normalize_text(' '.join(samples))} "
     id_score = sum(1 for m in INDONESIAN_MARKERS if f" {m} " in text)
     en_score = sum(1 for m in ENGLISH_MARKERS if f" {m} " in text)
+    en_score += sum(1 for m in ENGLISH_VERB_MARKERS if f" {m} " in text)
+    # Extra hint for common contractions/phrasing.
+    lowered = " ".join(samples).lower()
+    if any(p in lowered for p in [" i'm ", " you're ", " don't ", " can't ", "how are you", "what's"]):
+        en_score += 2
     return "id" if id_score >= en_score else "en"
 
 
@@ -92,6 +110,18 @@ TUTORIAL_MARKERS = [
     "how to use", "cara pakai", "cara menggunakan", "gimana pakai", "tutorial", "langkah",
     "step by step", "how do i use", "how can i use", "penggunaan", "cara kerja tool",
 ]
+PRICING_MARKERS = [
+    "pricing", "harga", "biaya", "cost", "plan", "paket", "langganan", "subscription",
+]
+CONTACT_MARKERS = [
+    "contact", "kontak", "hubungi", "whatsapp", "email", "telegram", "discord", "cs",
+]
+TROUBLESHOOT_MARKERS = [
+    "error", "gagal", "failed", "problem", "masalah", "tidak bisa", "not working", "bug", "issue",
+]
+SMALLTALK_MARKERS = [
+    "halo", "hai", "hi", "pagi", "siang", "malam", "apa kabar", "lagi hujan", "makasih", "thanks",
+]
 
 
 def build_search_query(message: str, history: List[Dict[str, Any]]) -> str:
@@ -128,10 +158,11 @@ def build_search_queries(message: str, history: List[Dict[str, Any]]) -> List[st
     base_query = build_search_query(message, history)
     short_query = extract_core_query(message)
     full_query = normalize_text(message)
+    expanded_query = expand_query_with_glossary(base_query)
 
     queries: List[str] = []
     seen: Set[str] = set()
-    for q in [base_query, short_query, full_query]:
+    for q in [base_query, expanded_query, short_query, full_query]:
         normalized = normalize_text(q)
         if not normalized or normalized in seen:
             continue
@@ -147,6 +178,27 @@ def is_tutorial_intent(message: str) -> bool:
     if any(marker in text for marker in TUTORIAL_MARKERS):
         return True
     return ("how" in text and "use" in text) or ("cara" in text and ("pakai" in text or "gunakan" in text))
+
+
+def classify_intent_mode(message: str) -> str:
+    text = normalize_text(message)
+    if is_tutorial_intent(message):
+        return "tutorial"
+    if any(marker in text for marker in PRICING_MARKERS):
+        return "pricing"
+    if any(marker in text for marker in CONTACT_MARKERS):
+        return "contact"
+    if any(marker in text for marker in TROUBLESHOOT_MARKERS):
+        return "troubleshoot"
+    if any(marker in text for marker in SMALLTALK_MARKERS):
+        return "smalltalk"
+    if "fitur" in text or "feature" in text or "apa itu" in text or "what is" in text:
+        return "faq"
+    return "navigation"
+
+
+def is_smalltalk_intent(message: str) -> bool:
+    return classify_intent_mode(message) == "smalltalk"
 
 
 OWNER_MARKERS = [
@@ -198,7 +250,7 @@ def identity_response(language: str) -> Dict[str, Any]:
 
 
 def query_terms(message: str) -> List[str]:
-    tokens = tokenize_for_search(message)
+    tokens = tokenize_for_search(expand_query_with_glossary(message))
     terms: List[str] = []
     for token in tokens:
         if len(token) <= 2:
@@ -207,3 +259,46 @@ def query_terms(message: str) -> List[str]:
             continue
         terms.append(token)
     return terms
+
+
+def expand_query_with_glossary(query: str) -> str:
+    if not GLOSSARY_EXPANSION_ENABLED:
+        return normalize_text(query)
+    normalized = normalize_text(query)
+    if not normalized:
+        return normalized
+    tokens = tokenize_for_search(normalized)
+    expanded: List[str] = list(tokens)
+    seen = set(expanded)
+    for group in MULTILINGUAL_GLOSSARY.values():
+        group_tokens = [normalize_text(v) for v in group if normalize_text(v)]
+        if not group_tokens:
+            continue
+        if not any(token in normalized for token in group_tokens):
+            continue
+        for token in group_tokens:
+            for part in token.split():
+                if part and part not in seen:
+                    seen.add(part)
+                    expanded.append(part)
+                    if len(expanded) >= max(4, GLOSSARY_MAX_TERMS):
+                        return " ".join(expanded)
+    return " ".join(expanded)
+
+
+def should_handoff_to_human(message: str) -> bool:
+    text = normalize_text(message)
+    if not text:
+        return False
+    if any(keyword in text for keyword in HUMAN_HANDOFF_KEYWORDS):
+        return True
+    explicit_patterns = [
+        "talk to human",
+        "speak to human",
+        "speak with agent",
+        "hubungkan ke admin",
+        "mau bicara admin",
+        "mau orang asli",
+        "tolong sambungkan",
+    ]
+    return any(pattern in text for pattern in explicit_patterns)

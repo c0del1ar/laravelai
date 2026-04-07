@@ -20,11 +20,14 @@ Tujuan utama:
 2. Indexing
 - Full-page lexical index (token overlap + tf weighting)
 - Chunk index (window + overlap) untuk menangkap detail section halaman panjang
+- Vector index (SQLite) untuk semantic retrieval berbasis embeddings
 - Site catalog index (path/title/section) untuk awareness navigasi global (`/tools`, `/pricing`, dll)
 
 3. Retrieval
 - Multi-query search generation dari user prompt + follow-up history
 - Merge hasil Laravel internal search
+- Hybrid retrieval (lexical + semantic-hash) + reranker
+- Optional real embedding mode (`EMBEDDING_PROVIDER=openai`) untuk semantic recall yang lebih kuat
 - Chunk-first retrieval (evidence detail), lanjut search+crawl merge, lalu full-page fallback
 - Context yang dikirim ke LLM dibatasi (`CONTEXT_MAX_PAGES`) agar stabil
 
@@ -32,14 +35,20 @@ Tujuan utama:
 - LLM (Groq) menerima:
   - `page_context` (grounding utama)
   - `site_catalog` (daftar halaman situs)
+  - `tool_manifest_context` + `playbook` untuk tutorial penggunaan tools
   - persona/policy Xiao-An
 - LLM wajib output JSON terstruktur untuk post-processing
+- Ada hard input-token budget agar request tidak melebihi limit TPM model
+- Ada model fallback + retry policy untuk mengurangi failure rate saat rate-limit/timeout
 
 5. Guardrails / Post-processing
 - Validasi URL agar tidak halusinasi (harus ada di KB/catalog)
 - Relevance scoring berbasis evidence
 - Link otomatis dihapus jika tidak relevan
 - Fallback URL dipilih dari skor terbaik jika model gagal mengembalikan link padahal evidence kuat
+- Tambah `confidence_score` + `sources` (citation ringan)
+- Jika confidence rendah: model minta klarifikasi, bukan menebak
+- Guardrail per channel (`web/openclaw/openai`) untuk panjang jawaban dan detail output
 
 ## 2. Persona dan Respons
 
@@ -71,6 +80,31 @@ Aturan penting:
 - `GET /admin/rag/debug?q=...`
 - Menampilkan search queries, chunk hits, page hits, context pages, catalog preview
 
+5. Observability
+- `GET /admin/metrics`
+- Menampilkan metrik route, status code, latency, confidence, memory usage, dan event error terakhir
+
+6. Incremental indexing
+- `POST /admin/index/changed`
+- Refresh parsial path/url yang berubah tanpa full recrawl
+
+7. Learning loop
+- Low-confidence/error case disimpan ke learning store
+- Admin bisa lihat, koreksi, dan export dataset dari:
+  - `GET /admin/learning/failures`
+  - `POST /admin/learning/corrections`
+  - `GET /admin/learning/export`
+
+8. AI Ops panel
+- `GET /admin/ops`
+- Dashboard ringkas untuk metrics, trigger recrawl, incremental indexing, dan review failure learning.
+
+9. SLO alerting
+- Alert webhook ketika:
+  - HTTP 5xx rate melewati threshold
+  - chat latency rata-rata terlalu tinggi
+  - confidence rata-rata terlalu rendah
+
 ## 4. Konfigurasi Kunci
 
 Crawler/indexing:
@@ -94,6 +128,18 @@ OpenClaw compatibility:
 - `OPENCLAW_COMPAT_MODEL_ID`
 - `OPENAI_HISTORY_LIMIT`
 - `OPENAI_MESSAGE_MAX_CHARS`
+
+Model fallback + budget:
+- `GROQ_FALLBACK_MODELS`
+- `GROQ_RETRY_MAX_ATTEMPTS`
+- `GROQ_RETRY_BASE_DELAY_MS`
+- `LLM_MAX_INPUT_TOKENS`
+- `LOW_CONFIDENCE_THRESHOLD`
+
+Memory:
+- `MEMORY_STORE_PATH`
+- `MEMORY_MAX_TURNS`
+- `MEMORY_TTL_SECONDS`
 
 ## 5. Strategy Tuning yang Disarankan
 
@@ -127,16 +173,9 @@ OpenClaw compatibility:
 4. Konsistensi channel
 - Pertanyaan sama di web dan WA memberi jawaban setara (konten + link relevan)
 
-## 7. Roadmap Upgrade Lanjutan (Opsional)
+## 7. Evaluation harness
 
-1. Hybrid semantic retrieval (embeddings) + reranker
-- Tambah vector store untuk recall semantic lebih tinggi
-- Tetap gabung dengan lexical retrieval agar robust
-
-2. Freshness pipeline
-- Partial recrawl berbasis perubahan sitemap `lastmod`
-- Prioritas crawl untuk halaman penting (pricing/tools/docs)
-
-3. Evaluation harness
-- Dataset Q/A internal per topik (pricing, fitur, tools, kontak)
-- Auto-score: accuracy, relevance, link correctness
+Sudah tersedia baseline evaluasi otomatis:
+- Dataset: `ai-stack/evals/eval_cases.jsonl`
+- Runner: `ai-stack/evals/run_eval.py`
+- Output: `eval_report.json` (keyword coverage, URL relevance, confidence, latency, total score)

@@ -10,12 +10,14 @@ from .config import (
     RAG_CHUNK_TOP_K,
     RAG_CONTEXT_CHUNKS,
     RAG_MAX_CHUNKS_PER_PAGE,
+    RAG_RERANK_CANDIDATES,
     SEARCH_API_KEY,
     SEARCH_API_URL,
 )
 from .html_utils import normalize_path, tokenize_for_search
 from .knowledge_base import kb
 from .nlp import normalize_text, query_terms
+from .ranking import confidence_from_entries, rerank_entries
 
 
 def url_path(url: str) -> str:
@@ -100,10 +102,16 @@ def summarize_form_specs(forms: List[Dict[str, Any]], max_forms: int = 2, max_fi
     return " | ".join(blocks)
 
 
-def build_context_for_groq(query: str, search_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    context_pages: List[Dict[str, Any]] = []
+def build_context_for_groq(
+    query: str,
+    search_items: List[Dict[str, Any]],
+    semantic_chunks: List[Dict[str, Any]] | None = None,
+    intent_mode: str = "navigation",
+) -> List[Dict[str, Any]]:
+    context_candidates: List[Dict[str, Any]] = []
     seen_entries: Set[str] = set()
     chunks_per_path: Counter = Counter()
+    candidate_cap = max(CONTEXT_MAX_PAGES * 3, RAG_RERANK_CANDIDATES)
 
     def _entry_key(entry: Dict[str, Any]) -> str:
         return normalize_text(
@@ -119,8 +127,6 @@ def build_context_for_groq(query: str, search_items: List[Dict[str, Any]]) -> Li
         return normalize_path(value)
 
     def _add_entry(*, title: str, url: str, summary: str, content: str, source: str) -> bool:
-        if len(context_pages) >= CONTEXT_MAX_PAGES:
-            return False
         clean_entry = {
             "title": str(title or "").strip(),
             "url": str(url or "").strip(),
@@ -134,7 +140,7 @@ def build_context_for_groq(query: str, search_items: List[Dict[str, Any]]) -> Li
         if key in seen_entries:
             return False
         seen_entries.add(key)
-        context_pages.append(clean_entry)
+        context_candidates.append(clean_entry)
         return True
 
     search_by_path: Dict[str, Dict[str, Any]] = {}
@@ -144,6 +150,18 @@ def build_context_for_groq(query: str, search_items: List[Dict[str, Any]]) -> Li
         path = _safe_path_from_url(str(item.get("url", "")))
         if path not in search_by_path:
             search_by_path[path] = item
+
+    semantic_chunks = semantic_chunks or []
+    for chunk in semantic_chunks[: max(CONTEXT_MAX_PAGES * 3, 12)]:
+        if not isinstance(chunk, dict):
+            continue
+        _add_entry(
+            title=str(chunk.get("title", "")).strip(),
+            url=str(chunk.get("url", "")).strip(),
+            summary="",
+            content=str(chunk.get("content", "")).strip(),
+            source="vector-semantic",
+        )
 
     chunk_results = kb.search_relevant_chunks(query, top_k=max(RAG_CHUNK_TOP_K, CONTEXT_MAX_PAGES * 3))
     for chunk in chunk_results:
@@ -159,10 +177,10 @@ def build_context_for_groq(query: str, search_items: List[Dict[str, Any]]) -> Li
 
         if _add_entry(title=title, url=raw_url, summary=summary, content=content, source="crawl-chunk"):
             chunks_per_path[path] += 1
-        if len(context_pages) >= min(CONTEXT_MAX_PAGES, RAG_CONTEXT_CHUNKS):
+        if len(context_candidates) >= min(candidate_cap, max(6, RAG_CONTEXT_CHUNKS + 6)):
             break
 
-    for item in search_items[: max(CONTEXT_MAX_PAGES * 2, 10)]:
+    for item in search_items[: max(CONTEXT_MAX_PAGES * 3, 12)]:
         if not isinstance(item, dict):
             continue
         raw_url = str(item.get("url", "")).strip()
@@ -179,11 +197,11 @@ def build_context_for_groq(query: str, search_items: List[Dict[str, Any]]) -> Li
             content=page_content,
             source="search+crawl" if page else "search",
         )
-        if len(context_pages) >= CONTEXT_MAX_PAGES:
+        if len(context_candidates) >= candidate_cap:
             break
 
-    if len(context_pages) < CONTEXT_MAX_PAGES:
-        kb_results = kb.search_relevant(query, top_k=max(CONTEXT_MAX_PAGES * 2, 10))
+    if len(context_candidates) < CONTEXT_MAX_PAGES * 3:
+        kb_results = kb.search_relevant(query, top_k=max(CONTEXT_MAX_PAGES * 3, 12))
         for page in kb_results:
             page_form = summarize_form_specs(page.forms)
             content = page.content
@@ -196,10 +214,21 @@ def build_context_for_groq(query: str, search_items: List[Dict[str, Any]]) -> Li
                 content=content,
                 source="crawl",
             )
-            if len(context_pages) >= CONTEXT_MAX_PAGES:
+            if len(context_candidates) >= candidate_cap:
                 break
 
-    return context_pages[:CONTEXT_MAX_PAGES]
+    q_terms = query_terms(query)
+    ranked = rerank_entries(
+        query,
+        q_terms,
+        context_candidates,
+        top_k=max(CONTEXT_MAX_PAGES, min(candidate_cap, RAG_RERANK_CANDIDATES)),
+        intent_mode=intent_mode,
+    )
+    return [
+        {k: v for k, v in item.items() if k != "_score"}
+        for item in ranked[:CONTEXT_MAX_PAGES]
+    ]
 
 
 def page_relevance_score(message: str, page: Dict[str, Any]) -> float:
@@ -306,3 +335,52 @@ def enrich_navigation_result(
         result["recommended_type"] = "page"
     result["reason"] = str(result.get("reason", "")).strip() or "Fallback to best matching page from search context."
     return result
+
+
+def build_response_sources(context_pages: List[Dict[str, Any]], max_items: int = 3) -> List[Dict[str, str]]:
+    sources: List[Dict[str, str]] = []
+    seen_urls: Set[str] = set()
+    for page in context_pages:
+        if not isinstance(page, dict):
+            continue
+        url = str(page.get("url", "")).strip()
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        title = str(page.get("title", "")).strip() or url
+        source_type = str(page.get("source", "")).strip() or "context"
+        snippet = str(page.get("summary", "")).strip() or str(page.get("content", "")).strip()
+        snippet = snippet[:180].strip()
+        sources.append(
+            {
+                "title": title,
+                "url": url,
+                "source": source_type,
+                "snippet": snippet,
+            }
+        )
+        if len(sources) >= max_items:
+            break
+    return sources
+
+
+def estimate_confidence(message: str, context_pages: List[Dict[str, Any]], recommended_url: str = "") -> float:
+    q_terms = query_terms(message)
+    if not context_pages:
+        return 0.18
+
+    staged = []
+    for page in context_pages:
+        if not isinstance(page, dict):
+            continue
+        score = page_relevance_score(message, page)
+        item = dict(page)
+        item["_score"] = score
+        staged.append(item)
+
+    conf = confidence_from_entries(q_terms, staged)
+    if recommended_url:
+        conf = min(0.99, conf + 0.04)
+    if has_context_relevance(message, context_pages):
+        conf = min(0.99, conf + 0.06)
+    return round(conf, 3)

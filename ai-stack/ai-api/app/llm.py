@@ -2,10 +2,7 @@ import json
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 
-import httpx
-
 from .config import (
-    GROQ_API_KEY,
     GROQ_MODEL,
     LLM_MAX_CONTEXT_CONTENT_CHARS,
     LLM_MAX_CONTEXT_PAGES,
@@ -19,6 +16,7 @@ from .config import (
     LLM_MAX_TOOL_STEPS,
     SITE_NAVIGATION_BRIEF,
 )
+from .groq_client import post_chat_completion
 from .knowledge_base import kb
 from .nlp import OWNER_PROFILE
 from .retrieval import url_path
@@ -134,6 +132,34 @@ def _compact_tool_manifests(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                 "input_schema": {"fields": fields},
                 "steps": steps,
                 "output_explained": _truncate_text(str(item.get("output_explained", "")), 260),
+                "playbook": {
+                    "what_it_does": _truncate_text(str((item.get("playbook", {}) or {}).get("what_it_does", "")), 260),
+                    "input_tips": [
+                        _truncate_text(str(v), 120)
+                        for v in (((item.get("playbook", {}) or {}).get("input_tips", []) or [])[:6])
+                        if str(v).strip()
+                    ],
+                    "troubleshooting": [
+                        _truncate_text(str(v), 120)
+                        for v in (((item.get("playbook", {}) or {}).get("troubleshooting", []) or [])[:5])
+                        if str(v).strip()
+                    ],
+                },
+                "hook": {
+                    "examples": [
+                        {
+                            "label": _truncate_text(str((example or {}).get("label", "")), 60),
+                            "value": _truncate_text(str((example or {}).get("value", "")), 120),
+                        }
+                        for example in (((item.get("hook", {}) or {}).get("examples", []) or [])[:6])
+                        if isinstance(example, dict)
+                    ],
+                    "tips": [
+                        _truncate_text(str(v), 120)
+                        for v in (((item.get("hook", {}) or {}).get("tips", []) or [])[:6])
+                        if str(v).strip()
+                    ],
+                },
             }
         )
     return compact
@@ -147,6 +173,9 @@ def _build_navigation_user_payload(
     site_catalog: List[Dict[str, Any]],
     tool_manifest_context: List[Dict[str, Any]],
     tutorial_mode: bool,
+    intent_mode: str,
+    channel: str,
+    prompt_variant: str,
 ) -> Dict[str, Any]:
     return {
         "question": _truncate_text(message, 900),
@@ -155,6 +184,9 @@ def _build_navigation_user_payload(
         "site_catalog": site_catalog,
         "tool_manifest_context": tool_manifest_context,
         "tutorial_mode": tutorial_mode,
+        "intent_mode": intent_mode,
+        "channel": channel,
+        "prompt_variant": prompt_variant,
     }
 
 
@@ -168,31 +200,23 @@ Be warm, manja, and proud. Keep it 1-3 sentences. Use "aiya", "wah", "lah" natur
 Return valid JSON only: {{"answer":"string","recommended_type":"none","recommended_url":"","reason":"string","related_items":[]}}
 """.strip()
 
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [
+    response_json, model_used = await post_chat_completion(
+        messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps({"question": message}, ensure_ascii=False)},
         ],
-        "temperature": 0.65,
-        "response_format": {"type": "json_object"},
-    }
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            json=payload,
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-        )
-        resp.raise_for_status()
+        temperature=0.65,
+        response_format={"type": "json_object"},
+        preferred_model=GROQ_MODEL,
+    )
 
     try:
-        result = json.loads(resp.json()["choices"][0]["message"]["content"])
+        result = json.loads(response_json["choices"][0]["message"]["content"])
         return {
             "answer": str(result.get("answer", "")),
             "recommended_type": "none",
             "recommended_url": "",
-            "reason": "User asked about owner.",
+            "reason": f"User asked about owner. model={model_used}",
             "related_items": [],
         }
     except Exception:
@@ -212,6 +236,10 @@ async def ask_groq_navigate(
     language: str,
     tutorial_mode: bool = False,
     tool_manifest_context: List[Dict[str, Any]] | None = None,
+    intent_mode: str = "navigation",
+    channel: str = "web",
+    prompt_variant: str = "control",
+    model_override: str = "",
 ) -> Dict[str, Any]:
     lang_name = "Indonesian" if language == "id" else "English"
     compact_history = _compact_history(history)
@@ -242,6 +270,29 @@ TUTORIAL MODE:
 - If manifest data is incomplete, explicitly say details are incomplete and do not guess.
 """ if tutorial_mode else ""
 
+    intent_rules = f"""
+INTENT MODE:
+- Active intent: {intent_mode}
+- If intent is pricing: prioritize pricing/plan/cost pages.
+- If intent is contact: prioritize contact/support channels.
+- If intent is troubleshoot: answer with troubleshooting steps first.
+- If intent is faq/navigation: prioritize concise factual direction.
+""".strip()
+
+    channel_rules = """
+CHANNEL RULES:
+- If channel=openclaw: keep answer compact for mobile chat, max 3 short paragraphs.
+- If channel=openai: keep technical JSON-clean style and avoid decorative filler.
+- If channel=web: balanced detail with clear link guidance.
+""".strip()
+
+    variant_rules = """
+PROMPT VARIANT:
+- control: balanced answer and navigation.
+- concise: fewer words, direct instruction, one primary link only.
+- advisor: include one short recommendation sentence before directing.
+""".strip()
+
     system_prompt = f"""
 You are Xiao-An, a female AI assistant for AryaKun.
 Reply in {lang_name}. Match the user's language naturally.
@@ -269,11 +320,16 @@ NAVIGATION RULES (CRITICAL):
 7. Use page content to give a smart, specific answer — not a generic one.
 8. Only return recommended_url when it is clearly relevant to the user's question.
 9. For generic conversation/chitchat/non-website questions, set recommended_url = "".
+10. If context is uncertain or weak, do not force links; ask a brief clarification instead.
 
 RESPONSE STYLE:
 - Answer as Xiao-An talking to a client.
 - Keep concise.
 - If no exact website grounding exists, answer helpfully without forcing a link.
+{intent_rules}
+{channel_rules}
+{variant_rules}
+Current channel={channel}, variant={prompt_variant}.
 {tutorial_rules}
 
 RESPONSE — valid JSON only, no markdown:
@@ -294,9 +350,12 @@ RESPONSE — valid JSON only, no markdown:
             site_catalog=compact_catalog,
             tool_manifest_context=compact_manifests,
             tutorial_mode=tutorial_mode,
+            intent_mode=intent_mode,
+            channel=channel,
+            prompt_variant=prompt_variant,
         )
         return {
-            "model": GROQ_MODEL,
+            "model": model_override.strip() or GROQ_MODEL,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
@@ -328,16 +387,15 @@ RESPONSE — valid JSON only, no markdown:
                 break
         payload = _make_payload()
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            json=payload,
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-        )
-        resp.raise_for_status()
+    response_json, model_used = await post_chat_completion(
+        messages=payload["messages"],
+        temperature=payload["temperature"],
+        response_format=payload["response_format"],
+        preferred_model=model_override.strip() or GROQ_MODEL,
+    )
 
     try:
-        result = json.loads(resp.json()["choices"][0]["message"]["content"])
+        result = json.loads(response_json["choices"][0]["message"]["content"])
     except Exception:
         return not_found_response(language)
 
@@ -357,4 +415,8 @@ RESPONSE — valid JSON only, no markdown:
 
     if not result.get("answer"):
         return not_found_response(language)
+    result["reason"] = (
+        str(result.get("reason", "")).strip()
+        + f" model={model_used} variant={prompt_variant} intent={intent_mode} channel={channel}"
+    ).strip()
     return result

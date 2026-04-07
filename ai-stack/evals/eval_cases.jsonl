@@ -1,0 +1,29 @@
+{"id":"tools_noredirect_tutorial","question":"how to use no redirect checker?","must_include":["redirect","url","input"],"expected_url_contains":"/tools/noredirect"}
+{"id":"pricing_question","question":"berapa pricing layanan di Aryakun?","must_include":["pricing"],"expected_url_contains":"/pricing"}
+{"id":"about_aryakun","question":"siapa aryakun?","must_include":["aryakun"],"expected_url_contains":"/about"}
+{"id":"contact_info","question":"bagaimana cara kontak tim Aryakun?","must_include":["kontak"],"expected_url_contains":"/contact"}
+{"id":"tools_overview","question":"fitur tools apa saja di website ini?","must_include":["tools"],"expected_url_contains":"/tools"}
+{"id":"feature_question","question":"fitur utama layanan AI automation di website ini apa?","must_include":["fitur"],"expected_url_contains":"/"}
+{"id":"blog_related","question":"ada artikel blog tentang automation atau ai?","must_include":["artikel"],"expected_url_contains":"/blog"}
+{"id":"identity_query","question":"siapa kamu?","must_include":["xiao-an","aryakun"],"expected_url_contains":""}
+{"id":"non_website_smalltalk","question":"lagi hujan nih","must_include":[],"expected_url_contains":""}
+{"id":"tool_usage_generic","question":"cara pakai tools checker di website ini?","must_include":["cara","tool"],"expected_url_contains":"/tools"}
+{"id":"tool_usage_noredirect_id","question":"cara menggunakan no redirect checker di tools Aryakun","must_include":["redirect","url"],"expected_url_contains":"/tools/noredirect","intent":"tutorial","language":"id"}
+{"id":"tool_usage_noredirect_en","question":"show me step by step to use no redirect checker","must_include":["step","input","redirect"],"expected_url_contains":"/tools/noredirect","intent":"tutorial","language":"en"}
+{"id":"pricing_en","question":"what is AryaKun pricing plan?","must_include":["pricing","plan"],"expected_url_contains":"/pricing","intent":"pricing","language":"en"}
+{"id":"contact_en","question":"how can i contact AryaKun support?","must_include":["contact","support"],"expected_url_contains":"/contact","intent":"contact","language":"en"}
+{"id":"contact_wa","question":"kontak whatsapp admin aryakun dimana?","must_include":["kontak"],"expected_url_contains":"/contact","intent":"contact","language":"id"}
+{"id":"blog_ai_en","question":"do you have blog about ai automation?","must_include":["blog","ai"],"expected_url_contains":"/blog","intent":"navigation","language":"en"}
+{"id":"blog_ai_id","question":"ada artikel tentang ai automation?","must_include":["artikel","ai"],"expected_url_contains":"/blog","intent":"navigation","language":"id"}
+{"id":"about_en","question":"what is AryaKun and what does it do?","must_include":["aryakun"],"expected_url_contains":"/about","intent":"faq","language":"en"}
+{"id":"tools_list_en","question":"what tools are available on your website?","must_include":["tool"],"expected_url_contains":"/tools","intent":"faq","language":"en"}
+{"id":"tools_list_id","question":"tools apa saja yang tersedia di website?","must_include":["tools"],"expected_url_contains":"/tools","intent":"faq","language":"id"}
+{"id":"handoff_human_id","question":"sambungkan saya ke admin manusia","must_include":["tim","manusia"],"expected_url_contains":"/contact","intent":"handoff","language":"id"}
+{"id":"handoff_human_en","question":"i need a real human agent","must_include":["human","team"],"expected_url_contains":"/contact","intent":"handoff","language":"en"}
+{"id":"generic_chitchat_en","question":"how are you today","must_include":["xiao-an"],"expected_url_contains":"","intent":"smalltalk","language":"en"}
+{"id":"generic_chitchat_id","question":"apa kabar xiao-an","must_include":["xiao-an"],"expected_url_contains":"","intent":"smalltalk","language":"id"}
+{"id":"feature_en","question":"what are the key features of your ai service","must_include":["feature"],"expected_url_contains":"/","intent":"faq","language":"en"}
+{"id":"feature_id","question":"fitur utama layanan ai di website ini apa","must_include":["fitur"],"expected_url_contains":"/","intent":"faq","language":"id"}
+{"id":"contact_discord","question":"apakah ada discord untuk support","must_include":["discord","kontak"],"expected_url_contains":"/contact","intent":"contact","language":"id"}
+{"id":"navigation_tools_shortcut","question":"quick shortcut to tools page","must_include":["tools"],"expected_url_contains":"/tools","intent":"navigation","language":"en"}
+{"id":"non_relevant_math","question":"berapa 2+2?","must_include":[],"expected_url_contains":"","intent":"smalltalk","language":"id"}

@@ -50,8 +50,24 @@ Blueprint arsitektur lengkap ada di [ai-stack/docs/rag-blueprint.md](/home/an/Pr
 - `config/ai_catalog.php` perlu kamu sesuaikan dengan model Laravel yang benar.
 - Output AI sekarang konsisten untuk Laravel chat dan OpenClaw: jawaban + link relevan + link terkait (jika ada).
 - Link hanya diberikan jika pertanyaan memang relevan dengan halaman website; untuk chat umum/non-website tidak dipaksa ada link.
-- AI core sekarang memakai pipeline crawler + indexing + retrieval bertingkat (chunk-first + page fallback), bukan regex template statis.
-- Untuk pertanyaan "how to use / cara pakai tool", AI memprioritaskan tools manifest (input field, steps, output, error cases) dari endpoint internal Laravel.
+- AI core sekarang memakai hybrid retrieval (lexical + semantic-hash) + reranker, lalu fallback chunk/page.
+- Retrieval sekarang pakai reranker kandidat lebih lebar (`RAG_RERANK_CANDIDATES`) + intent boost (pricing/contact/tutorial) supaya hasil konteks lebih presisi.
+- Semantic retrieval sekarang bisa pakai embedding beneran (`EMBEDDING_PROVIDER=openai`) dengan vector store SQLite (`VECTOR_DB_PATH`), fallback ke local-hash jika key tidak tersedia.
+- Untuk pertanyaan "how to use / cara pakai tool", AI memprioritaskan tools manifest + playbook (what-it-does, input tips, troubleshooting) dari endpoint internal Laravel.
+- Ada tool hook layer (contoh: `noredirect`) untuk contoh input valid/invalid dan tips penggunaan yang lebih praktis.
+- Response API sekarang menyertakan `confidence_score` dan `sources` (citation ringan) agar kualitas jawaban bisa diaudit.
+- Memory percakapan lintas channel disimpan per `user_id` (`web`, `openclaw`, `openai-compatible`) dengan TTL.
+- Response cache semantik aktif (`RESPONSE_CACHE_*`) untuk turunkan latency/cost pada pertanyaan berulang.
+- Strict grounding aktif (`STRICT_GROUNDING_*`): jika konteks lemah, AI tidak memaksa link dan akan minta klarifikasi.
+- Human handoff aktif (`HUMAN_HANDOFF_*`): jika user minta admin/human atau low-confidence streak, AI arahkan ke jalur kontak manusia.
+- Tersedia observability endpoint `GET /admin/metrics` untuk pantau latency, error, confidence, memory, dan statistik route.
+- Metrics sekarang termasuk flag kualitas (`low_confidence`, `handoff`, `cache_hit`, `ungrounded`) dan statistik prefix-gate.
+- Intent router aktif (`tutorial|pricing|contact|troubleshoot|faq|smalltalk|navigation`) dengan retrieval policy berbeda per mode.
+- A/B experiment prompt+model tersedia (`control|concise|advisor`) via env config, dan termonitor di metrics.
+- Learning loop aktif: low-confidence/error case otomatis tercatat dan bisa dikoreksi via endpoint admin.
+- AI Ops panel tersedia di `GET /admin/ops`.
+- Tersedia incremental indexing endpoint `POST /admin/index/changed` agar update halaman bisa di-refresh tanpa full recrawl.
+- SLO alerting tersedia via webhook jika error rate/latency/confidence melewati threshold.
 
 ## Browser / frontend
 
@@ -145,6 +161,42 @@ LLM_MAX_TOOL_FIELDS=8
 LLM_MAX_TOOL_STEPS=6
 ```
 
+Aktifkan semantic embeddings + vector store:
+
+```env
+EMBEDDING_PROVIDER=openai
+OPENAI_API_KEY=<your-openai-key>
+EMBEDDING_MODEL=text-embedding-3-small
+VECTOR_DB_PATH=/var/lib/ai_fastapi/vector_store.db
+SEMANTIC_TOP_K=10
+SEMANTIC_MIN_SCORE=0.2
+```
+
+Aktifkan A/B experiment dan channel policy:
+
+```env
+AB_EXPERIMENT_ENABLED=true
+AB_VARIANTS=control,concise,advisor
+AB_MODEL_CONTROL=llama-3.1-8b-instant
+AB_MODEL_CONCISE=llama-3.1-8b-instant
+AB_MODEL_ADVISOR=llama-3.1-70b-versatile
+CHANNEL_POLICY_WEB_MAX_SENTENCES=5
+CHANNEL_POLICY_OPENCLAW_MAX_SENTENCES=3
+CHANNEL_POLICY_OPENAI_MAX_SENTENCES=4
+```
+
+Aktifkan SLO alerting:
+
+```env
+SLO_ALERT_ENABLED=true
+SLO_ALERT_WEBHOOK_URL=https://your-webhook-url
+SLO_ALERT_COOLDOWN_SECONDS=300
+SLO_HTTP_5XX_RATE_THRESHOLD=0.05
+SLO_CHAT_LATENCY_MS_THRESHOLD=5000
+SLO_CHAT_CONFIDENCE_THRESHOLD=0.45
+SLO_MIN_SAMPLE_SIZE=20
+```
+
 Lalu deploy ulang FastAPI:
 
 ```bash
@@ -166,6 +218,137 @@ Response debug menampilkan:
 - chunk hits + page hits dari crawler index
 - context final yang dikirim ke LLM
 - preview katalog halaman situs
+
+## Incremental indexing
+
+Untuk update sebagian halaman tanpa full recrawl:
+
+```http
+POST /admin/index/changed
+X-Index-Key: <INTERNAL_INDEX_KEY>
+Content-Type: application/json
+```
+
+Payload:
+
+```json
+{
+  "paths": ["/tools/noredirect", "/pricing"],
+  "urls": ["https://aryakun.id/blog/some-post"]
+}
+```
+
+Di sisi Laravel, tersedia endpoint forwarder internal:
+
+```http
+POST /api/internal/ai/index/changed
+X-Search-Key: <AI_INTERNAL_SEARCH_KEY>
+```
+
+Endpoint ini meneruskan perubahan ke FastAPI dengan `X-Index-Key`.
+
+Untuk mode event queue (debounced auto-index), gunakan endpoint:
+
+```http
+POST /admin/index/events
+X-Index-Key: <INTERNAL_INDEX_KEY>
+Content-Type: application/json
+```
+
+Payload sama dengan `/admin/index/changed`, bedanya proses refresh dilakukan async di background.
+
+## Regression Eval
+
+Jalankan evaluasi regresi setelah deploy:
+
+```bash
+cd ai-stack/evals
+./run_regression.sh http://127.0.0.1:8008 0.66
+```
+
+- Exit code `0`: lulus threshold.
+- Exit code `2`: rata-rata score di bawah threshold.
+
+Alternatif dari root project:
+
+```bash
+make eval EVAL_BASE_URL=http://127.0.0.1:8008 EVAL_MIN_SCORE=0.66
+```
+
+## CI Otomatis (Push/PR)
+
+Workflow tersedia di `.github/workflows/ai-regression.yml`:
+- `compile-check` selalu jalan (syntax compile Python).
+- `eval` jalan otomatis jika secret `GROQ_API_KEY` tersedia.
+
+Set minimal secret repository:
+
+```text
+GROQ_API_KEY=<your-groq-api-key>
+```
+
+## Learning Loop
+
+Endpoint admin learning:
+
+```http
+GET  /admin/learning/failures?limit=100
+POST /admin/learning/corrections
+GET  /admin/learning/export?limit=1000
+```
+
+Header untuk endpoint admin learning:
+
+```http
+X-Index-Key: <INTERNAL_INDEX_KEY>
+```
+
+`/admin/learning/corrections` payload:
+
+```json
+{
+  "event_id": "evt_xxx",
+  "corrected_answer": "jawaban yang benar",
+  "corrected_url": "https://aryakun.id/tools/noredirect",
+  "tags": ["tools", "tutorial"]
+}
+```
+
+UI ringkas tersedia di:
+
+```http
+GET /admin/ops
+```
+
+## Model fallback (anti rate-limit / timeout)
+
+Aktifkan fallback model Groq di `.env`:
+
+```env
+GROQ_MODEL=llama-3.1-8b-instant
+GROQ_FALLBACK_MODELS=llama-3.1-8b-instant,llama-3.1-70b-versatile,meta-llama/llama-4-scout-17b-16e-instruct
+GROQ_RETRY_MAX_ATTEMPTS=3
+GROQ_RETRY_BASE_DELAY_MS=350
+LOW_CONFIDENCE_THRESHOLD=0.42
+```
+
+## Eval otomatis (quality gate)
+
+Dataset eval ada di `ai-stack/evals/eval_cases.jsonl`.
+
+Jalankan evaluasi:
+
+```bash
+cd ai-stack/evals
+python3 run_eval.py --base-url http://127.0.0.1:8008
+```
+
+Hasil tersimpan di `ai-stack/evals/eval_report.json` dengan metrik:
+- keyword coverage
+- URL relevance
+- confidence
+- latency
+- total score rata-rata
 
 ### Endpoint legacy (opsional)
 

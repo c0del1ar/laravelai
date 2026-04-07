@@ -28,6 +28,7 @@ from .html_utils import (
     normalize_path,
     tokenize_for_search,
 )
+from .vector_store import vector_store
 
 
 class PageInfo:
@@ -106,6 +107,12 @@ class WebsiteKnowledgeBase:
                     }
                 )
         self._chunks = chunks
+
+    async def _reindex_vectors(self):
+        try:
+            await vector_store.reindex_chunks(self._chunks)
+        except Exception:
+            pass
 
     def _save_cache(self):
         try:
@@ -236,6 +243,28 @@ class WebsiteKnowledgeBase:
             ranked.append(payload)
         return ranked
 
+    async def search_semantic_chunks(self, query: str, top_k: int = 8) -> List[Dict[str, str]]:
+        try:
+            items = await vector_store.search(query, top_k=top_k)
+        except Exception:
+            return []
+        normalized: List[Dict[str, str]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            normalized.append(
+                {
+                    "chunk_id": str(item.get("chunk_id", "")),
+                    "path": str(item.get("path", "")),
+                    "url": str(item.get("url", "")),
+                    "title": str(item.get("title", "")),
+                    "content": str(item.get("content", "")),
+                    "score": str(item.get("score", "0")),
+                    "source": "vector-semantic",
+                }
+            )
+        return normalized
+
     async def crawl(self):
         async with self._lock:
             if not self.is_stale:
@@ -245,6 +274,14 @@ class WebsiteKnowledgeBase:
     async def force_crawl(self):
         async with self._lock:
             await self._do_crawl()
+
+    async def rebuild_vector_index(self):
+        async with self._lock:
+            await self._reindex_vectors()
+
+    async def refresh_paths(self, paths: List[str]) -> Dict[str, int]:
+        async with self._lock:
+            return await self._refresh_paths_locked(paths)
 
     async def _do_crawl(self):
         if not SITE_BASE_URL:
@@ -273,8 +310,42 @@ class WebsiteKnowledgeBase:
         self._pages = new_pages
         self._rebuild_chunks()
         self._rebuild_catalog()
+        await self._reindex_vectors()
         self._crawled_at = time.time()
         self._save_cache()
+
+    async def _refresh_paths_locked(self, paths: List[str]) -> Dict[str, int]:
+        if not SITE_BASE_URL:
+            return {"requested": 0, "updated": 0, "removed": 0}
+
+        normalized = [normalize_path(p) for p in paths if str(p).strip()]
+        unique_paths = list(dict.fromkeys(normalized))
+        if not unique_paths:
+            return {"requested": 0, "updated": 0, "removed": 0}
+
+        base = SITE_BASE_URL.rstrip("/")
+        public_base = (SITE_PUBLIC_URL or SITE_BASE_URL).rstrip("/")
+        sem = asyncio.Semaphore(6)
+        tasks = [self._crawl_page(base, public_base, path, sem) for path in unique_paths]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        updated = 0
+        removed = 0
+        for path, result in zip(unique_paths, results):
+            if isinstance(result, PageInfo):
+                self._pages[result.path] = result
+                updated += 1
+                continue
+            if path in self._pages:
+                self._pages.pop(path, None)
+                removed += 1
+
+        self._rebuild_chunks()
+        self._rebuild_catalog()
+        await self._reindex_vectors()
+        self._crawled_at = time.time()
+        self._save_cache()
+        return {"requested": len(unique_paths), "updated": updated, "removed": removed}
 
     async def _fetch_sitemap_paths(self, base: str) -> Set[str]:
         paths: Set[str] = set()
