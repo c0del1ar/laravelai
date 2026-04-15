@@ -27,3 +27,8 @@
 {"id":"contact_discord","question":"apakah ada discord untuk support","must_include":["discord","kontak"],"expected_url_contains":"/contact","intent":"contact","language":"id"}
 {"id":"navigation_tools_shortcut","question":"quick shortcut to tools page","must_include":["tools"],"expected_url_contains":"/tools","intent":"navigation","language":"en"}
 {"id":"non_relevant_math","question":"berapa 2+2?","must_include":[],"expected_url_contains":"","intent":"smalltalk","language":"id"}
+{"id":"tools_form_fields_id","question":"field input apa saja di tool no redirect checker?","must_include":["input","redirect"],"expected_url_contains":"/tools/noredirect","intent":"tutorial","language":"id"}
+{"id":"tools_troubleshoot_en","question":"no redirect checker says invalid result, how to troubleshoot?","must_include":["troubleshooting"],"expected_url_contains":"/tools/noredirect","intent":"tutorial","language":"en"}
+{"id":"product_navigation_id","question":"produk atau layanan yang tersedia di Aryakun apa saja?","must_include":["layanan"],"expected_url_contains":"/products","intent":"product","language":"id"}
+{"id":"about_founder_id","question":"tentang Aryakun dan siapa timnya","must_include":["aryakun"],"expected_url_contains":"/about","intent":"about","language":"id"}
+{"id":"smalltalk_no_link_en","question":"thanks xiao-an, have a nice day","must_include":["xiao-an"],"expected_url_contains":"","intent":"smalltalk","language":"en","expect_no_link":true}

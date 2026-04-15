@@ -37,3 +37,5 @@ website/bootstrap/cache/*.php
 # Project runtime artifacts
 website/db_backups/
 ai-stack/evals/eval_report.json
+ai-stack/training/data/
+ai-stack/training/output/

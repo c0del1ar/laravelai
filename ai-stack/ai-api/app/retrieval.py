@@ -107,6 +107,7 @@ def build_context_for_groq(
     search_items: List[Dict[str, Any]],
     semantic_chunks: List[Dict[str, Any]] | None = None,
     intent_mode: str = "navigation",
+    catalog_items: List[Dict[str, Any]] | None = None,
 ) -> List[Dict[str, Any]]:
     context_candidates: List[Dict[str, Any]] = []
     seen_entries: Set[str] = set()
@@ -196,6 +197,27 @@ def build_context_for_groq(
             summary=str(item.get("summary", "")).strip(),
             content=page_content,
             source="search+crawl" if page else "search",
+        )
+        if len(context_candidates) >= candidate_cap:
+            break
+
+    catalog_items = catalog_items or []
+    for item in catalog_items[: max(CONTEXT_MAX_PAGES * 2, 10)]:
+        if not isinstance(item, dict):
+            continue
+        raw_url = str(item.get("url", "")).strip()
+        if not raw_url:
+            continue
+        summary = str(item.get("summary", "")).strip()
+        keywords = item.get("keywords", [])
+        if isinstance(keywords, list) and keywords:
+            summary = (summary + " Keywords: " + ", ".join(str(v).strip() for v in keywords[:10] if str(v).strip())).strip()
+        _add_entry(
+            title=str(item.get("title", "")).strip(),
+            url=raw_url,
+            summary=summary,
+            content=summary,
+            source="catalog-structured",
         )
         if len(context_candidates) >= candidate_cap:
             break

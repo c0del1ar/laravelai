@@ -22,6 +22,7 @@ Tujuan utama:
 - Chunk index (window + overlap) untuk menangkap detail section halaman panjang
 - Vector index (SQLite) untuk semantic retrieval berbasis embeddings
 - Site catalog index (path/title/section) untuk awareness navigasi global (`/tools`, `/pricing`, dll)
+- Structured catalog ingestion dari Laravel internal endpoint (`/internal/ai/catalog`) untuk metadata halaman non-HTML (summary/keywords/updated_at)
 
 3. Retrieval
 - Multi-query search generation dari user prompt + follow-up history
@@ -88,18 +89,24 @@ Aturan penting:
 - `POST /admin/index/changed`
 - Refresh parsial path/url yang berubah tanpa full recrawl
 
-7. Learning loop
+7. Structured catalog (Laravel)
+- `GET /api/internal/ai/catalog`
+- Sumber metadata halaman terstruktur (type/section/title/url/path/summary/keywords/updated_at)
+- Dipakai bersama crawl index agar AI tetap punya konteks saat konten dinamis tidak lengkap di HTML crawl
+
+8. Learning loop
 - Low-confidence/error case disimpan ke learning store
 - Admin bisa lihat, koreksi, dan export dataset dari:
   - `GET /admin/learning/failures`
   - `POST /admin/learning/corrections`
   - `GET /admin/learning/export`
+  - `POST /v1/feedback` (feedback eksplisit dari user/channel)
 
-8. AI Ops panel
+9. AI Ops panel
 - `GET /admin/ops`
 - Dashboard ringkas untuk metrics, trigger recrawl, incremental indexing, dan review failure learning.
 
-9. SLO alerting
+10. SLO alerting
 - Alert webhook ketika:
   - HTTP 5xx rate melewati threshold
   - chat latency rata-rata terlalu tinggi

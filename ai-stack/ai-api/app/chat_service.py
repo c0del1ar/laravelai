@@ -34,19 +34,17 @@ from .config import (
 )
 from .experiments import choose_experiment_variant
 from .handoff_state import handoff_state
+from .intent_router import classify_intent_profile, expand_queries_for_intent
 from .knowledge_base import kb
 from .learning_loop import learning_store
 from .llm import ask_groq_navigate, ask_groq_owner, not_found_response
 from .memory_store import memory_store
 from .nlp import (
-    build_search_queries,
-    classify_intent_mode,
     detect_language,
     identity_response,
     is_identity_query,
     is_owner_query,
     is_smalltalk_intent,
-    is_tutorial_intent,
     should_handoff_to_human,
 )
 from .retrieval import (
@@ -61,8 +59,9 @@ from .retrieval import (
 from .observability import observability
 from .prefix_gate_store import prefix_gate_store
 from .response_cache import build_response_cache_key, response_cache
+from .site_catalog import build_catalog_context_entries, fetch_site_catalog, merge_site_catalogs, rank_catalog_items
 from .tool_hooks import apply_tool_hook
-from .tools_manifest import find_relevant_tool_manifests
+from .tools_manifest import fetch_tool_manifest_by_slug, find_relevant_tool_manifests
 
 
 logger = logging.getLogger("ai_fastapi")
@@ -374,6 +373,7 @@ def format_ai_result_text(result: Dict[str, Any], language: str, channel: str = 
 
 def present_ai_result(result: Dict[str, Any], language: str, channel: str = "web") -> Dict[str, Any]:
     payload = dict(result)
+    payload["response_id"] = str(payload.get("response_id", "")).strip() or f"res_{uuid.uuid4().hex[:16]}"
     raw_answer = str(payload.get("answer", "")).strip()
     rendered_answer = format_ai_result_text(payload, language, channel=channel).strip()
 
@@ -424,8 +424,9 @@ async def generate_chat_response(
 
     merged_history = await memory_store.merge_with_request_history(user_id or "", channel, history)
     language = detect_language(message, merged_history)
-    intent_mode = classify_intent_mode(message)
-    tutorial_mode = intent_mode == "tutorial" or is_tutorial_intent(message)
+    intent_profile = classify_intent_profile(message)
+    intent_mode = str(intent_profile.get("intent_mode", "navigation"))
+    tutorial_mode = bool(intent_profile.get("tutorial_mode", False))
     experiment_variant, experiment_model = choose_experiment_variant(user_id or "", channel)
 
     if kb.page_count == 0:
@@ -500,33 +501,50 @@ async def generate_chat_response(
     tool_context: List[Dict[str, Any]] = []
     if tutorial_mode:
         try:
-            tool_manifests = await find_relevant_tool_manifests(message, top_k=3)
+            tool_slug_hint = str(intent_profile.get("tool_slug_hint", "")).strip()
+            if tool_slug_hint:
+                hinted = await fetch_tool_manifest_by_slug(tool_slug_hint)
+                if hinted:
+                    tool_manifests.append(hinted)
+            discovered = await find_relevant_tool_manifests(message, top_k=3)
+            for item in discovered:
+                slug = str(item.get("slug", "")).strip().lower()
+                if slug and any(str(v.get("slug", "")).strip().lower() == slug for v in tool_manifests):
+                    continue
+                tool_manifests.append(item)
+            tool_manifests = tool_manifests[:4]
             tool_manifests = [apply_tool_hook(item) for item in tool_manifests]
             tool_context = [_manifest_to_context_entry(item) for item in tool_manifests]
         except Exception:
             tool_manifests = []
             tool_context = []
 
-    search_queries = build_search_queries(message, merged_history)
-    if intent_mode == "pricing":
-        search_queries = [search_queries[0] + " pricing harga paket"] + search_queries
-    elif intent_mode == "contact":
-        search_queries = [search_queries[0] + " kontak contact whatsapp email"] + search_queries
-    elif intent_mode == "troubleshoot":
-        search_queries = [search_queries[0] + " error troubleshooting panduan"] + search_queries
+    search_queries = expand_queries_for_intent(message, merged_history, intent_profile)
 
     search_batches = await asyncio.gather(*(search_website(q) for q in search_queries[:3]))
     search_items = merge_search_items(search_batches)
     semantic_chunks = await kb.search_semantic_chunks(search_queries[0], top_k=8)
+    local_catalog = kb.get_catalog(max_items=min(SITE_CATALOG_MAX_ITEMS, 120))
+    remote_catalog = await fetch_site_catalog()
+    merged_catalog = merge_site_catalogs(local_catalog, remote_catalog, max_items=min(SITE_CATALOG_MAX_ITEMS, 180))
+    catalog_candidates = rank_catalog_items(
+        search_queries[0],
+        merged_catalog,
+        intent_mode=intent_mode,
+        top_k=max(CONTEXT_MAX_PAGES * 2, 16),
+    )
+    catalog_context = build_catalog_context_entries(catalog_candidates, max_items=max(2, CONTEXT_MAX_PAGES // 2))
     base_context = build_context_for_groq(
         search_queries[0],
         search_items,
         semantic_chunks=semantic_chunks,
         intent_mode=intent_mode,
+        catalog_items=catalog_candidates,
     )
-    context_pages = _merge_context_with_priority(tool_context, base_context, max_items=CONTEXT_MAX_PAGES)
+    context_primary = _merge_context_with_priority(tool_context, base_context, max_items=CONTEXT_MAX_PAGES * 2)
+    context_pages = _merge_context_with_priority(context_primary, catalog_context, max_items=CONTEXT_MAX_PAGES)
 
-    site_catalog = kb.get_catalog(max_items=min(SITE_CATALOG_MAX_ITEMS, 40))
+    site_catalog = merged_catalog[: min(SITE_CATALOG_MAX_ITEMS, 80)]
     for item in tool_manifests[:20]:
         site_catalog.append(
             {

@@ -23,9 +23,21 @@ def score_case(case: Dict[str, Any], response_json: Dict[str, Any], latency_ms: 
     answer = str(response_json.get("answer_raw") or response_json.get("answer") or "").lower()
     recommended_url = str(response_json.get("recommended_url", "")).strip().lower()
     confidence = float(response_json.get("confidence_score", 0.0) or 0.0)
+    detected_intent = str(response_json.get("intent_mode", "")).strip().lower()
+    sources = response_json.get("sources", [])
+    source_urls = []
+    if isinstance(sources, list):
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            value = str(source.get("url", "")).strip().lower()
+            if value:
+                source_urls.append(value)
 
     must_include = [str(v).lower() for v in case.get("must_include", []) if str(v).strip()]
     expected_url_contains = str(case.get("expected_url_contains", "")).strip().lower()
+    expected_intent = str(case.get("intent", "")).strip().lower()
+    expect_no_link = bool(case.get("expect_no_link", False)) or (expected_url_contains == "")
 
     keyword_hits = sum(1 for token in must_include if token in answer)
     keyword_score = (keyword_hits / len(must_include)) if must_include else 1.0
@@ -33,23 +45,54 @@ def score_case(case: Dict[str, Any], response_json: Dict[str, Any], latency_ms: 
     if expected_url_contains:
         url_match = expected_url_contains in recommended_url or expected_url_contains in answer
         url_score = 1.0 if url_match else 0.0
+        source_match = any(expected_url_contains in value for value in source_urls)
+        source_score = 1.0 if source_match or url_match else 0.0
     else:
-        url_score = 1.0
+        url_score = 1.0 if not recommended_url else 0.0
+        source_score = 1.0 if not source_urls else 0.4
+
+    if expected_intent:
+        if detected_intent == expected_intent:
+            intent_score = 1.0
+        elif expected_intent in detected_intent or detected_intent in expected_intent:
+            intent_score = 0.7
+        else:
+            intent_score = 0.0
+    else:
+        intent_score = 1.0
+
+    grounded_score = 1.0
+    if recommended_url:
+        grounded_score = 1.0 if any(recommended_url == value for value in source_urls) else 0.45
+    elif not expect_no_link:
+        grounded_score = 0.5
 
     confidence_score = min(1.0, max(0.0, confidence))
     latency_score = 1.0 if latency_ms <= 4500 else max(0.0, 1.0 - ((latency_ms - 4500) / 8000))
 
-    total = (0.45 * keyword_score) + (0.25 * url_score) + (0.2 * confidence_score) + (0.1 * latency_score)
+    total = (
+        (0.30 * keyword_score)
+        + (0.22 * url_score)
+        + (0.12 * source_score)
+        + (0.10 * intent_score)
+        + (0.10 * grounded_score)
+        + (0.10 * confidence_score)
+        + (0.06 * latency_score)
+    )
 
     return {
         "id": case.get("id", ""),
         "question": case.get("question", ""),
         "keyword_score": round(keyword_score, 3),
         "url_score": round(url_score, 3),
+        "source_score": round(source_score, 3),
+        "intent_score": round(intent_score, 3),
+        "grounded_score": round(grounded_score, 3),
         "confidence_score": round(confidence_score, 3),
         "latency_ms": round(latency_ms, 2),
         "total_score": round(total, 3),
         "recommended_url": response_json.get("recommended_url", ""),
+        "detected_intent": detected_intent,
     }
 
 

@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AiProxyController;
+use App\Http\Controllers\InternalAiCatalogController;
 use App\Http\Controllers\InternalAiIndexController;
 use App\Http\Controllers\InternalAiSearchController;
 use App\Http\Controllers\InternalAiToolsController;
@@ -11,6 +12,7 @@ Route::post('/ai/chat', AiProxyController::class);
 // Endpoint ini dipakai oleh FastAPI dari docker network internal.
 // Lindungi dengan header X-Search-Key.
 Route::get('/internal/ai/search', InternalAiSearchController::class);
+Route::get('/internal/ai/catalog', InternalAiCatalogController::class);
 Route::get('/internal/ai/tools', [InternalAiToolsController::class, 'index']);
 Route::get('/internal/ai/tools/{slug}', [InternalAiToolsController::class, 'show']);
 Route::post('/internal/ai/index/changed', InternalAiIndexController::class);

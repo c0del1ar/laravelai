@@ -63,6 +63,44 @@ class LearningLoopStore:
             await self._save()
         return event_id
 
+    async def record_feedback(
+        self,
+        *,
+        channel: str,
+        user_id: str,
+        message: str,
+        answer: str,
+        recommended_url: str,
+        reason: str,
+        intent_mode: str,
+        rating: int,
+        response_id: str = "",
+    ) -> str:
+        event_id = f"fb_{uuid.uuid4().hex[:16]}"
+        normalized_rating = 1 if rating > 0 else (-1 if rating < 0 else 0)
+        status = "open" if normalized_rating <= 0 else "closed"
+        event = {
+            "id": event_id,
+            "source": "feedback",
+            "ts": int(time.time()),
+            "channel": channel,
+            "user_id": user_id,
+            "message": message[:1200],
+            "answer": answer[:2000],
+            "recommended_url": recommended_url[:400],
+            "reason": reason[:400],
+            "intent_mode": intent_mode[:50],
+            "rating": normalized_rating,
+            "response_id": response_id[:80],
+            "status": status,
+            "correction": None,
+        }
+        async with self._lock:
+            self._events.append(event)
+            self._events = self._events[-LEARNING_MAX_EVENTS:]
+            await self._save()
+        return event_id
+
     async def list_open(self, limit: int = 100) -> List[Dict[str, Any]]:
         async with self._lock:
             items = [dict(item) for item in self._events if str(item.get("status", "")) == "open"]
@@ -96,7 +134,19 @@ class LearningLoopStore:
             total = len(self._events)
             open_count = sum(1 for item in self._events if str(item.get("status", "")) == "open")
             corrected = total - open_count
-        return {"total": total, "open": open_count, "corrected": corrected}
+            feedback_total = sum(1 for item in self._events if str(item.get("source", "")) == "feedback")
+            feedback_negative = sum(
+                1
+                for item in self._events
+                if str(item.get("source", "")) == "feedback" and int(item.get("rating", 0) or 0) < 0
+            )
+        return {
+            "total": total,
+            "open": open_count,
+            "corrected": corrected,
+            "feedback_total": feedback_total,
+            "feedback_negative": feedback_negative,
+        }
 
 
 learning_store = LearningLoopStore()

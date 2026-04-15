@@ -7,6 +7,7 @@ Pola yang dipakai:
 - OpenClaw (WA/Telegram/Discord) -> FastAPI OpenAI-compatible (`http://ai_fastapi:8008/v1/chat/completions`)
 - FastAPI -> Laravel internal search (`http://laravel_franken:8000/api/internal/ai/search`)
 - FastAPI -> Laravel internal tools manifest (`http://laravel_franken:8000/api/internal/ai/tools`)
+- FastAPI -> Laravel internal structured catalog (`http://laravel_franken:8000/api/internal/ai/catalog`)
 - FastAPI -> Groq API (LLM response)
 
 Blueprint arsitektur lengkap ada di [ai-stack/docs/rag-blueprint.md](/home/an/Project/myweb/laravelai/ai-stack/docs/rag-blueprint.md).
@@ -22,6 +23,7 @@ Blueprint arsitektur lengkap ada di [ai-stack/docs/rag-blueprint.md](/home/an/Pr
    - pakai `website/docker-compose.with-ai-bridge.yml`
    - tambahkan isi `website/.env.ai.example` ke `.env`
    - copy file controller/service/config/route snippet ke project Laravel
+   - register provider `App\Providers\AiAutoIndexServiceProvider` agar model event otomatis kirim perubahan path ke AI index queue
 
 3. Di project AI terpisah:
    - copy folder `ai-stack/`
@@ -30,6 +32,7 @@ Blueprint arsitektur lengkap ada di [ai-stack/docs/rag-blueprint.md](/home/an/Pr
    - pastikan `SEARCH_API_URL=http://laravel_franken:8000/api/internal/ai/search`
    - samakan `SEARCH_API_KEY` dengan `AI_INTERNAL_SEARCH_KEY` di Laravel
    - pastikan `TOOL_MANIFEST_API_URL=http://laravel_franken:8000/api/internal/ai/tools`
+   - pastikan `CATALOG_API_URL=http://laravel_franken:8000/api/internal/ai/catalog`
    - isi `SITE_NAVIGATION_BRIEF` untuk menegaskan fokus konten website (pricing, fitur, tentang Aryakun, kontak, dll)
    - atur parameter crawl/index (`CRAWL_*`, `RAG_*`, `SITE_CATALOG_MAX_ITEMS`) sesuai ukuran situs
    - set `OPENCLAW_WEBHOOK_KEY` (opsional, hanya untuk endpoint `/v1/openclaw`)
@@ -45,12 +48,14 @@ Blueprint arsitektur lengkap ada di [ai-stack/docs/rag-blueprint.md](/home/an/Pr
 
 - FastAPI **tidak dipublish** ke host. Ia hanya `expose: 8008` di Docker network.
 - FastAPI sekarang memakai volume `ai_fastapi_data` untuk cache knowledge base (`KB_CACHE_PATH`) agar indeks crawl tidak hilang saat container restart.
+- FastAPI sekarang juga bisa menarik catalog terstruktur dari Laravel (`/internal/ai/catalog`) sebagai sinyal navigasi non-HTML (section/title/keywords/updated_at).
 - LLM dipanggil dari FastAPI ke Groq API, jadi `GROQ_API_KEY` wajib diisi di `ai-stack/.env`.
 - Browser user hanya bicara ke route Laravel, jadi tidak perlu CORS untuk AI stack.
 - `config/ai_catalog.php` perlu kamu sesuaikan dengan model Laravel yang benar.
 - Output AI sekarang konsisten untuk Laravel chat dan OpenClaw: jawaban + link relevan + link terkait (jika ada).
 - Link hanya diberikan jika pertanyaan memang relevan dengan halaman website; untuk chat umum/non-website tidak dipaksa ada link.
 - AI core sekarang memakai hybrid retrieval (lexical + semantic-hash) + reranker, lalu fallback chunk/page.
+- AI core sekarang menggabungkan sumber crawl HTML + structured catalog Laravel + tool manifest, lalu intent-aware reranking.
 - Retrieval sekarang pakai reranker kandidat lebih lebar (`RAG_RERANK_CANDIDATES`) + intent boost (pricing/contact/tutorial) supaya hasil konteks lebih presisi.
 - Semantic retrieval sekarang bisa pakai embedding beneran (`EMBEDDING_PROVIDER=openai`) dengan vector store SQLite (`VECTOR_DB_PATH`), fallback ke local-hash jika key tidak tersedia.
 - Untuk pertanyaan "how to use / cara pakai tool", AI memprioritaskan tools manifest + playbook (what-it-does, input tips, troubleshooting) dari endpoint internal Laravel.
@@ -123,8 +128,11 @@ CRAWL_PAGE_TEXT_MAX_CHARS=20000
 CONTEXT_PAGE_CONTENT_CHARS=3000
 CONTEXT_MAX_PAGES=10
 TOOL_MANIFEST_API_URL=http://laravel_franken:8000/api/internal/ai/tools
+CATALOG_API_URL=http://laravel_franken:8000/api/internal/ai/catalog
 TOOL_MANIFEST_TTL=300
 TOOL_MANIFEST_MAX_ITEMS=200
+CATALOG_TTL=300
+CATALOG_MAX_ITEMS=250
 RAG_CHUNK_SIZE_CHARS=900
 RAG_CHUNK_OVERLAP_CHARS=140
 RAG_CHUNK_TOP_K=24
@@ -213,8 +221,10 @@ GET /admin/rag/debug?q=tools
 
 Response debug menampilkan:
 - query turunan yang dipakai AI
+- intent profile + query bias yang aktif
 - hasil search Laravel yang tergabung
 - hasil tools manifest yang relevan (khusus intent tutorial penggunaan tool)
+- kandidat structured catalog Laravel
 - chunk hits + page hits dari crawler index
 - context final yang dikirim ke LLM
 - preview katalog halaman situs
@@ -246,6 +256,37 @@ X-Search-Key: <AI_INTERNAL_SEARCH_KEY>
 ```
 
 Endpoint ini meneruskan perubahan ke FastAPI dengan `X-Index-Key`.
+
+## Auto-index dari event Laravel (publish/update/delete)
+
+Event model sekarang bisa otomatis trigger indexing ke FastAPI queue endpoint (`/admin/index/events`), jadi tidak perlu panggil endpoint manual setiap update konten.
+
+File utama:
+- `website/app/Services/AiAutoIndexObserverRegistrar.php`
+- `website/app/Services/AiIndexBridgeService.php`
+- `website/app/Providers/AiAutoIndexServiceProvider.php`
+
+Aktifkan provider di project Laravel kamu:
+
+- Laravel <=10: tambahkan `App\Providers\AiAutoIndexServiceProvider::class` ke `config/app.php` bagian `providers`.
+- Laravel 11: daftarkan provider di `bootstrap/app.php` sesuai pola project kamu.
+
+Konfigurasi env:
+
+```env
+AI_AUTO_INDEX_ENABLED=true
+AI_AUTO_INDEX_TIMEOUT=8
+AI_INDEX_ENDPOINT=/admin/index/events
+```
+
+Untuk tiap source di `config/ai_catalog.php`, kamu bisa aktifkan filter publish:
+
+```php
+'publish_field' => 'status',
+'published_values' => ['published', 'active', 1, true],
+```
+
+Jika `publish_field` dipakai, draft/unpublished tidak akan dipush kecuali ada transisi dari/ke status published.
 
 Untuk mode event queue (debounced auto-index), gunakan endpoint:
 
@@ -295,6 +336,7 @@ Endpoint admin learning:
 GET  /admin/learning/failures?limit=100
 POST /admin/learning/corrections
 GET  /admin/learning/export?limit=1000
+POST /v1/feedback
 ```
 
 Header untuk endpoint admin learning:
@@ -311,6 +353,22 @@ X-Index-Key: <INTERNAL_INDEX_KEY>
   "corrected_answer": "jawaban yang benar",
   "corrected_url": "https://aryakun.id/tools/noredirect",
   "tags": ["tools", "tutorial"]
+}
+```
+
+`/v1/feedback` payload (dari web/openclaw bridge):
+
+```json
+{
+  "message": "how to use no redirect checker",
+  "answer": "jawaban dari AI",
+  "recommended_url": "/tools/noredirect",
+  "user_id": "user-123",
+  "channel": "web",
+  "reason": "jawaban kurang detail di input field",
+  "intent_mode": "tutorial",
+  "rating": -1,
+  "response_id": "res_xxxxx"
 }
 ```
 
@@ -349,6 +407,41 @@ Hasil tersimpan di `ai-stack/evals/eval_report.json` dengan metrik:
 - confidence
 - latency
 - total score rata-rata
+
+## Fine-tuning Xiao-An (LoRA)
+
+Pipeline fine-tuning sudah disiapkan di folder `ai-stack/training/`:
+
+1. Export data learning:
+
+```bash
+make ft-export INDEX_KEY=<INTERNAL_INDEX_KEY>
+```
+
+2. Prepare dataset SFT:
+
+```bash
+make ft-prepare
+```
+
+3. Jalankan training LoRA (di mesin GPU):
+
+```bash
+python3 ai-stack/training/train_lora.py \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --train-file ai-stack/training/data/train.jsonl \
+  --valid-file ai-stack/training/data/valid.jsonl \
+  --output-dir ai-stack/training/output/lora-xiaoan-v1 \
+  --epochs 2 --lr 2e-4 --batch-size 2 --grad-accum 8 \
+  --max-seq-len 2048 --load-in-4bit --bf16 --gradient-checkpointing
+```
+
+Detail langkah dan script ada di:
+- `ai-stack/training/README.md`
+- `ai-stack/training/export_learning.py`
+- `ai-stack/training/prepare_sft_dataset.py`
+- `ai-stack/training/train_lora.py`
+- `ai-stack/training/merge_lora.py`
 
 ### Endpoint legacy (opsional)
 

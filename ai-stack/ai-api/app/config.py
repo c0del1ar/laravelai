@@ -42,6 +42,14 @@ TOOL_MANIFEST_API_URL = os.getenv("TOOL_MANIFEST_API_URL", _default_tools_manife
 TOOL_MANIFEST_TTL = int(os.getenv("TOOL_MANIFEST_TTL", "300"))
 TOOL_MANIFEST_MAX_ITEMS = int(os.getenv("TOOL_MANIFEST_MAX_ITEMS", "200"))
 
+_default_catalog_url = ""
+if SEARCH_API_URL and "/internal/ai/search" in SEARCH_API_URL:
+    _default_catalog_url = SEARCH_API_URL.replace("/internal/ai/search", "/internal/ai/catalog")
+CATALOG_API_URL = os.getenv("CATALOG_API_URL", _default_catalog_url)
+CATALOG_API_KEY = os.getenv("CATALOG_API_KEY", SEARCH_API_KEY)
+CATALOG_TTL = int(os.getenv("CATALOG_TTL", "300"))
+CATALOG_MAX_ITEMS = int(os.getenv("CATALOG_MAX_ITEMS", "250"))
+
 SITE_BASE_URL = os.getenv("SITE_BASE_URL", "")
 SITE_PUBLIC_URL = os.getenv("SITE_PUBLIC_URL", "")
 

@@ -21,15 +21,17 @@ from .config import INTERNAL_INDEX_KEY, OPENCLAW_WEBHOOK_KEY
 from .handoff_state import handoff_state
 from .html_utils import normalize_path
 from .index_event_queue import index_event_queue
+from .intent_router import classify_intent_profile, expand_queries_for_intent
 from .knowledge_base import kb
 from .learning_loop import learning_store
 from .memory_store import memory_store
 from .observability import observability
 from .prefix_gate_store import prefix_gate_store
-from .nlp import build_search_queries, detect_language, is_tutorial_intent
+from .nlp import detect_language
 from .response_cache import response_cache
 from .retrieval import build_context_for_groq, merge_search_items, search_website
-from .schemas import ChatRequest, IndexPathsRequest, LearningCorrectionRequest
+from .schemas import ChatRequest, FeedbackRequest, IndexPathsRequest, LearningCorrectionRequest
+from .site_catalog import fetch_site_catalog, merge_site_catalogs, rank_catalog_items, site_catalog_cache_stats
 from .slo_alerts import slo_alert_monitor
 from .tools_manifest import find_relevant_tool_manifests
 from .vector_store import vector_store
@@ -86,6 +88,7 @@ async def health():
         "response_cache": await response_cache.stats(),
         "handoff": await handoff_state.stats(),
         "index_queue": await index_event_queue.stats(),
+        "structured_catalog": site_catalog_cache_stats(),
         "vector": vector_stats,
     }
 
@@ -148,6 +151,7 @@ async def metrics():
     snapshot["handoff"] = await handoff_state.stats()
     snapshot["index_queue"] = await index_event_queue.stats()
     snapshot["vector"] = await vector_store.stats()
+    snapshot["structured_catalog"] = site_catalog_cache_stats()
     snapshot["kb"] = {
         "pages": kb.page_count,
         "chunks": kb.chunk_count,
@@ -163,18 +167,31 @@ async def rag_debug(q: str = Query(..., min_length=1, max_length=300)):
     if not query:
         raise HTTPException(status_code=422, detail="q is required")
 
-    search_queries = build_search_queries(query, [])
+    profile = classify_intent_profile(query)
+    intent_mode = str(profile.get("intent_mode", "navigation"))
+    tutorial_mode = bool(profile.get("tutorial_mode", False))
+    search_queries = expand_queries_for_intent(query, [], profile)
     search_batches = await asyncio.gather(*(search_website(item) for item in search_queries[:3]))
     search_items = merge_search_items(search_batches)
     semantic_chunks = await kb.search_semantic_chunks(search_queries[0], top_k=8)
-    context_pages = build_context_for_groq(search_queries[0], search_items, semantic_chunks=semantic_chunks, intent_mode="navigation")
+    local_catalog = kb.get_catalog(max_items=120)
+    remote_catalog = await fetch_site_catalog()
+    merged_catalog = merge_site_catalogs(local_catalog, remote_catalog, max_items=180)
+    catalog_candidates = rank_catalog_items(search_queries[0], merged_catalog, intent_mode=intent_mode, top_k=24)
+    context_pages = build_context_for_groq(
+        search_queries[0],
+        search_items,
+        semantic_chunks=semantic_chunks,
+        intent_mode=intent_mode,
+        catalog_items=catalog_candidates,
+    )
     chunk_hits = kb.search_relevant_chunks(search_queries[0], top_k=8)
-    tutorial_mode = is_tutorial_intent(query)
     tool_manifest_hits = await find_relevant_tool_manifests(query, top_k=5) if tutorial_mode else []
     page_hits = [{"path": page.path, "url": page.public_url, "title": page.title} for page in kb.search_relevant(search_queries[0], top_k=8)]
 
     return {
         "query": query,
+        "intent_profile": profile,
         "tutorial_mode": tutorial_mode,
         "search_queries": search_queries,
         "search_items": search_items[:8],
@@ -183,7 +200,9 @@ async def rag_debug(q: str = Query(..., min_length=1, max_length=300)):
         "chunk_hits": chunk_hits,
         "tool_manifest_hits": tool_manifest_hits,
         "page_hits": page_hits,
-        "catalog_preview": kb.get_catalog(max_items=20),
+        "catalog_remote_count": len(remote_catalog),
+        "catalog_preview": merged_catalog[:20],
+        "catalog_candidates": catalog_candidates[:20],
     }
 
 
@@ -292,6 +311,23 @@ async def chat(req: ChatRequest):
     ai_result = await generate_chat_response(req.message, req.history, user_id=req.user_id, channel="web")
     language = detect_language(req.message, req.history)
     return present_ai_result(ai_result, language, channel="web")
+
+
+@app.post("/v1/feedback")
+async def feedback(payload: FeedbackRequest):
+    channel = str(payload.channel or "web").strip() or "web"
+    feedback_id = await learning_store.record_feedback(
+        channel=channel[:24],
+        user_id=str(payload.user_id or "").strip(),
+        message=str(payload.message or "").strip(),
+        answer=str(payload.answer or "").strip(),
+        recommended_url=str(payload.recommended_url or "").strip(),
+        reason=str(payload.reason or "").strip(),
+        intent_mode=str(payload.intent_mode or "").strip(),
+        rating=int(payload.rating),
+        response_id=str(payload.response_id or "").strip(),
+    )
+    return {"ok": True, "feedback_id": feedback_id}
 
 
 @app.get("/v1/models")

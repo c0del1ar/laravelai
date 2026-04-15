@@ -81,6 +81,7 @@ def _intent_boost(intent_mode: str, doc: Dict[str, str]) -> float:
             str(doc.get("title", "")),
             str(doc.get("url", "")),
             str(doc.get("summary", "")),
+            str(doc.get("source", "")),
         ]
     ).lower()
     if intent_mode == "pricing":
@@ -89,6 +90,14 @@ def _intent_boost(intent_mode: str, doc: Dict[str, str]) -> float:
         return 0.85 if any(k in text for k in ["contact", "kontak", "support", "hubungi"]) else 0.0
     if intent_mode == "tutorial":
         return 0.7 if any(k in text for k in ["tool", "checker", "panduan", "tutorial"]) else 0.0
+    if intent_mode == "blog":
+        return 0.65 if any(k in text for k in ["blog", "artikel", "post"]) else 0.0
+    if intent_mode == "product":
+        return 0.65 if any(k in text for k in ["product", "produk", "layanan"]) else 0.0
+    if intent_mode == "feature":
+        return 0.55 if any(k in text for k in ["fitur", "feature", "capability"]) else 0.0
+    if intent_mode == "about":
+        return 0.55 if any(k in text for k in ["about", "tentang", "aryakun"]) else 0.0
     if intent_mode == "troubleshoot":
         return 0.65 if any(k in text for k in ["error", "troubleshoot", "faq", "issue"]) else 0.0
     return 0.0
@@ -121,6 +130,8 @@ def rerank_entries(
             source_boost = 0.45
         elif source == "search+crawl":
             source_boost = 0.35
+        elif source == "catalog-structured":
+            source_boost = 0.25
         upstream_score = _safe_float(entry.get("score"))
         upstream_boost = min(1.2, upstream_score / 8.0)
         form_boost = 0.2 if "form" in str(entry.get("content", "")).lower() else 0.0
