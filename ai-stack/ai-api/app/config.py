@@ -84,6 +84,7 @@ LLM_MAX_TOOL_MANIFESTS = int(os.getenv("LLM_MAX_TOOL_MANIFESTS", "2"))
 LLM_MAX_TOOL_FIELDS = int(os.getenv("LLM_MAX_TOOL_FIELDS", "8"))
 LLM_MAX_TOOL_STEPS = int(os.getenv("LLM_MAX_TOOL_STEPS", "6"))
 LOW_CONFIDENCE_THRESHOLD = float(os.getenv("LOW_CONFIDENCE_THRESHOLD", "0.42"))
+CS_ONLY_MODE = _as_bool(os.getenv("CS_ONLY_MODE", "true"))
 
 AB_EXPERIMENT_ENABLED = _as_bool(os.getenv("AB_EXPERIMENT_ENABLED", "false"))
 AB_VARIANTS = [

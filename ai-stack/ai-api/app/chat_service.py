@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from .channel_policy import apply_channel_guardrails
 from .config import (
     APP_LOG_LEVEL,
+    CS_ONLY_MODE,
     CONTEXT_MAX_PAGES,
     GROQ_API_KEY,
     HUMAN_HANDOFF_CONTACT_URL,
@@ -112,6 +113,28 @@ def _human_handoff_answer(language: str) -> str:
             f"Please continue via {contact_url}."
         )
     return "Aiya gege, for this case Xiao-An will route you to the human team for faster help."
+
+
+def _cs_execution_block_intro(language: str, target: str) -> str:
+    if language == "id":
+        if target == "account":
+            return (
+                "Aiya gege, Xiao-An mode customer service ya, jadi tidak bisa mengubah akun/transaksi langsung. "
+                "Xiao-An bisa bantu arahkan langkah aman atau sambungkan ke tim manusia."
+            )
+        return (
+            "Aiya gege, Xiao-An mode customer service ya, jadi tidak bisa mengeksekusi tool atau aksi otomatis secara langsung. "
+            "Xiao-An bisa kasih panduan step-by-step sampai kamu bisa jalanin sendiri."
+        )
+    if target == "account":
+        return (
+            "Aiya gege, Xiao-An is in customer-service mode, so I cannot directly change account or transaction data. "
+            "I can guide safe steps or route you to the human team."
+        )
+    return (
+        "Aiya gege, Xiao-An is in customer-service mode, so I cannot directly execute tools or automated actions. "
+        "I can provide step-by-step guidance so you can run it yourself."
+    )
 
 
 def _is_grounded_enough(result: Dict[str, Any], context_pages: List[Dict[str, Any]], message: str) -> bool:
@@ -462,23 +485,6 @@ async def generate_chat_response(
         await _record(True, 0.9, 0, "identity", intent="identity")
         return result
 
-    if is_smalltalk_intent(message):
-        result = {
-            "answer": _smalltalk_answer(language),
-            "recommended_type": "none",
-            "recommended_url": "",
-            "reason": "smalltalk short-circuit",
-            "related_items": [],
-            "sources": [],
-            "confidence_score": 0.86,
-            "intent_mode": "smalltalk",
-            "experiment_variant": experiment_variant,
-        }
-        result = apply_channel_guardrails(result, channel)
-        await memory_store.add_turn(user_id or "", channel, message, str(result.get("answer", "")))
-        await _record(True, 0.86, 0, "smalltalk", intent="smalltalk", variant=experiment_variant)
-        return result
-
     if HUMAN_HANDOFF_ENABLED and should_handoff_to_human(message):
         result = {
             "answer": _human_handoff_answer(language),
@@ -495,6 +501,91 @@ async def generate_chat_response(
         result = apply_channel_guardrails(result, channel)
         await memory_store.add_turn(user_id or "", channel, message, str(result.get("answer", "")))
         await _record(True, 0.96, 0, "handoff keyword", intent="handoff", variant=experiment_variant, handoff=True)
+        return result
+
+    if CS_ONLY_MODE and bool(intent_profile.get("execution_request", False)):
+        execution_target = str(intent_profile.get("execution_target", "general")).strip() or "general"
+        intro = _cs_execution_block_intro(language, execution_target)
+        block_result: Dict[str, Any] = {
+            "answer": intro,
+            "recommended_type": "none",
+            "recommended_url": "",
+            "reason": f"cs-only execution blocked ({execution_target})",
+            "related_items": [],
+            "sources": [],
+            "confidence_score": 0.9,
+            "intent_mode": "cs_blocked_execution",
+            "experiment_variant": experiment_variant,
+            "experiment_model": experiment_model,
+        }
+
+        if execution_target == "account" and HUMAN_HANDOFF_CONTACT_URL:
+            block_result["recommended_type"] = "page"
+            block_result["recommended_url"] = str(HUMAN_HANDOFF_CONTACT_URL or "").strip()
+            block_result["answer"] = (intro + " " + _human_handoff_answer(language)).strip()
+
+        if execution_target == "tool":
+            manifests: List[Dict[str, Any]] = []
+            try:
+                tool_slug_hint = str(intent_profile.get("tool_slug_hint", "")).strip()
+                if tool_slug_hint:
+                    hinted = await fetch_tool_manifest_by_slug(tool_slug_hint)
+                    if hinted:
+                        manifests.append(apply_tool_hook(hinted))
+                discovered = await find_relevant_tool_manifests(message, top_k=2)
+                for item in discovered:
+                    slug = str(item.get("slug", "")).strip().lower()
+                    if slug and any(str(v.get("slug", "")).strip().lower() == slug for v in manifests):
+                        continue
+                    manifests.append(apply_tool_hook(item))
+                manifests = manifests[:2]
+            except Exception:
+                manifests = []
+
+            if manifests:
+                primary = manifests[0]
+                tutorial_text = _format_tutorial_fallback(primary, language)
+                block_result["answer"] = (intro + "\n\n" + tutorial_text).strip()
+                primary_url = str(primary.get("url", "")).strip()
+                if primary_url:
+                    block_result["recommended_type"] = "tool"
+                    block_result["recommended_url"] = primary_url
+                    block_result["sources"] = [
+                        {
+                            "title": str(primary.get("name", "")).strip() or primary_url,
+                            "url": primary_url,
+                            "source": "tool-manifest",
+                            "snippet": str(primary.get("description", "")).strip()[:180],
+                        }
+                    ]
+
+        block_result = apply_channel_guardrails(block_result, channel)
+        await memory_store.add_turn(user_id or "", channel, message, str(block_result.get("answer", "")))
+        await _record(
+            True,
+            float(block_result.get("confidence_score", 0.0) or 0.0),
+            0,
+            str(block_result.get("reason", "")),
+            intent="cs_blocked_execution",
+            variant=experiment_variant,
+        )
+        return block_result
+
+    if is_smalltalk_intent(message):
+        result = {
+            "answer": _smalltalk_answer(language),
+            "recommended_type": "none",
+            "recommended_url": "",
+            "reason": "smalltalk short-circuit",
+            "related_items": [],
+            "sources": [],
+            "confidence_score": 0.86,
+            "intent_mode": "smalltalk",
+            "experiment_variant": experiment_variant,
+        }
+        result = apply_channel_guardrails(result, channel)
+        await memory_store.add_turn(user_id or "", channel, message, str(result.get("answer", "")))
+        await _record(True, 0.86, 0, "smalltalk", intent="smalltalk", variant=experiment_variant)
         return result
 
     tool_manifests: List[Dict[str, Any]] = []

@@ -29,14 +29,35 @@ python3 ai-stack/training/prepare_sft_dataset.py \
   --out-valid ai-stack/training/data/valid.jsonl \
   --out-stats ai-stack/training/data/stats.json \
   --valid-ratio 0.1 \
-  --inject-recommended-url
+  --inject-recommended-url \
+  --augment-refusal \
+  --refusal-max-samples 2000
 ```
 
 Output format per baris:
 - `messages` (ChatML style): system/user/assistant
 - `meta`: source, channel, intent, rating, status
 
-## 4) Train LoRA
+Catatan:
+- `--augment-refusal` akan membuat target jawaban refusal untuk prompt eksekusi (`execute/run/jalankan/reset akun`) agar model makin konsisten mode CS-only.
+
+## 4) Build dataset preference (DPO)
+
+```bash
+python3 ai-stack/training/prepare_dpo_dataset.py \
+  --input-jsonl ai-stack/training/data/learning_export.jsonl \
+  --out-train ai-stack/training/data/dpo_train.jsonl \
+  --out-valid ai-stack/training/data/dpo_valid.jsonl \
+  --out-stats ai-stack/training/data/dpo_stats.json \
+  --valid-ratio 0.1 \
+  --inject-recommended-url
+```
+
+Pair DPO dibangun dari:
+- event correction (`corrected_answer` vs jawaban lama)
+- feedback positif vs negatif pada prompt yang sama
+
+## 5) Train LoRA (SFT)
 
 Contoh (GPU 24GB+, Qwen 7B instruct, 4bit):
 
@@ -56,7 +77,27 @@ python3 ai-stack/training/train_lora.py \
   --gradient-checkpointing
 ```
 
-## 5) Merge adapter (opsional)
+## 6) Train DPO (opsional, setelah SFT)
+
+```bash
+python3 ai-stack/training/train_dpo.py \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --train-file ai-stack/training/data/dpo_train.jsonl \
+  --valid-file ai-stack/training/data/dpo_valid.jsonl \
+  --output-dir ai-stack/training/output/dpo-xiaoan-v1 \
+  --epochs 1 \
+  --lr 5e-6 \
+  --batch-size 1 \
+  --grad-accum 16 \
+  --max-length 2048 \
+  --max-prompt-length 1024 \
+  --beta 0.1 \
+  --load-in-4bit \
+  --bf16 \
+  --gradient-checkpointing
+```
+
+## 7) Merge adapter (opsional)
 
 ```bash
 python3 ai-stack/training/merge_lora.py \
@@ -73,4 +114,5 @@ python3 ai-stack/training/merge_lora.py \
   - low-confidence/error logs
   - correction admin
   - feedback `POST /v1/feedback`
+- Gunakan eval gate CS sebelum model dipromosikan: execution refusal rate, hallucinated URL rate, how-to completeness, handoff accuracy.
 - Setelah fine-tune, serve model di endpoint inference terpisah (vLLM/TGI) lalu arahkan AI core ke endpoint itu bila ingin dipakai produksi.

@@ -56,6 +56,7 @@ Blueprint arsitektur lengkap ada di [ai-stack/docs/rag-blueprint.md](/home/an/Pr
 - Link hanya diberikan jika pertanyaan memang relevan dengan halaman website; untuk chat umum/non-website tidak dipaksa ada link.
 - AI core sekarang memakai hybrid retrieval (lexical + semantic-hash) + reranker, lalu fallback chunk/page.
 - AI core sekarang menggabungkan sumber crawl HTML + structured catalog Laravel + tool manifest, lalu intent-aware reranking.
+- AI sekarang bisa dijalankan dalam mode customer-service only (`CS_ONLY_MODE=true`): tidak mengeksekusi aksi/tool, hanya panduan how-to dan info layanan.
 - Retrieval sekarang pakai reranker kandidat lebih lebar (`RAG_RERANK_CANDIDATES`) + intent boost (pricing/contact/tutorial) supaya hasil konteks lebih presisi.
 - Semantic retrieval sekarang bisa pakai embedding beneran (`EMBEDDING_PROVIDER=openai`) dengan vector store SQLite (`VECTOR_DB_PATH`), fallback ke local-hash jika key tidak tersedia.
 - Untuk pertanyaan "how to use / cara pakai tool", AI memprioritaskan tools manifest + playbook (what-it-does, input tips, troubleshooting) dari endpoint internal Laravel.
@@ -388,6 +389,7 @@ GROQ_FALLBACK_MODELS=llama-3.1-8b-instant,llama-3.1-70b-versatile,meta-llama/lla
 GROQ_RETRY_MAX_ATTEMPTS=3
 GROQ_RETRY_BASE_DELAY_MS=350
 LOW_CONFIDENCE_THRESHOLD=0.42
+CS_ONLY_MODE=true
 ```
 
 ## Eval otomatis (quality gate)
@@ -401,12 +403,22 @@ cd ai-stack/evals
 python3 run_eval.py --base-url http://127.0.0.1:8008
 ```
 
+Atau via script regression (dengan CS gate threshold default):
+
+```bash
+./ai-stack/evals/run_regression.sh http://127.0.0.1:8008 0.66
+```
+
 Hasil tersimpan di `ai-stack/evals/eval_report.json` dengan metrik:
 - keyword coverage
 - URL relevance
 - confidence
 - latency
 - total score rata-rata
+- execution refusal rate (CS-only)
+- hallucinated URL rate
+- how-to completeness
+- handoff accuracy
 
 ## Fine-tuning Xiao-An (LoRA)
 
@@ -424,7 +436,13 @@ make ft-export INDEX_KEY=<INTERNAL_INDEX_KEY>
 make ft-prepare
 ```
 
-3. Jalankan training LoRA (di mesin GPU):
+3. (Opsional tapi direkomendasikan) Prepare dataset DPO dari feedback:
+
+```bash
+make ft-prepare-dpo
+```
+
+4. Jalankan training LoRA (di mesin GPU):
 
 ```bash
 python3 ai-stack/training/train_lora.py \
@@ -440,7 +458,9 @@ Detail langkah dan script ada di:
 - `ai-stack/training/README.md`
 - `ai-stack/training/export_learning.py`
 - `ai-stack/training/prepare_sft_dataset.py`
+- `ai-stack/training/prepare_dpo_dataset.py`
 - `ai-stack/training/train_lora.py`
+- `ai-stack/training/train_dpo.py`
 - `ai-stack/training/merge_lora.py`
 
 ### Endpoint legacy (opsional)

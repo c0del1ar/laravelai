@@ -6,7 +6,7 @@ FT_BASE_URL ?= http://127.0.0.1:8008
 FT_LIMIT ?= 5000
 FT_DATA_DIR ?= ai-stack/training/data
 
-.PHONY: eval eval-ci eval-compile ft-export ft-prepare
+.PHONY: eval eval-ci eval-compile ft-export ft-prepare ft-prepare-dpo
 
 eval:
 	./ai-stack/evals/run_regression.sh "$(EVAL_BASE_URL)" "$(EVAL_MIN_SCORE)"
@@ -19,7 +19,9 @@ eval-compile:
 		ai-stack/evals/run_eval.py \
 		ai-stack/training/export_learning.py \
 		ai-stack/training/prepare_sft_dataset.py \
+		ai-stack/training/prepare_dpo_dataset.py \
 		ai-stack/training/train_lora.py \
+		ai-stack/training/train_dpo.py \
 		ai-stack/training/merge_lora.py
 
 ft-export:
@@ -36,5 +38,16 @@ ft-prepare:
 		--out-train "$(FT_DATA_DIR)/train.jsonl" \
 		--out-valid "$(FT_DATA_DIR)/valid.jsonl" \
 		--out-stats "$(FT_DATA_DIR)/stats.json" \
+		--valid-ratio 0.1 \
+		--inject-recommended-url \
+		--augment-refusal \
+		--refusal-max-samples 2000
+
+ft-prepare-dpo:
+	python3 ai-stack/training/prepare_dpo_dataset.py \
+		--input-jsonl "$(FT_DATA_DIR)/learning_export.jsonl" \
+		--out-train "$(FT_DATA_DIR)/dpo_train.jsonl" \
+		--out-valid "$(FT_DATA_DIR)/dpo_valid.jsonl" \
+		--out-stats "$(FT_DATA_DIR)/dpo_stats.json" \
 		--valid-ratio 0.1 \
 		--inject-recommended-url

@@ -14,6 +14,37 @@ INTENT_ALIASES: Dict[str, List[str]] = {
     "about": ["about", "tentang", "siapa aryakun", "company", "profil"],
 }
 
+EXECUTION_MARKERS = [
+    "jalankan",
+    "eksekusi",
+    "execute",
+    "run this",
+    "run it",
+    "do it for me",
+    "tolong kerjakan",
+    "kerjakan untuk saya",
+    "process this",
+    "langsung proses",
+    "cekkan",
+    "checkkan",
+    "bikinin hasil",
+    "generate for me",
+    "buatkan hasil",
+]
+
+ACCOUNT_ACTION_MARKERS = [
+    "reset akun",
+    "hapus akun",
+    "delete account",
+    "refund",
+    "bayarin",
+    "charge",
+    "cancel subscription",
+    "ubah paket saya",
+    "change my plan",
+    "transfer saldo",
+]
+
 
 def extract_tool_slug_hint(message: str) -> str:
     text = normalize_text(message)
@@ -75,12 +106,24 @@ def classify_intent_profile(message: str) -> Dict[str, Any]:
 
     tutorial_mode = mode == "tutorial" or is_tutorial_intent(message)
     tool_slug_hint = extract_tool_slug_hint(message) if tutorial_mode else ""
+    account_action_request = any(marker in text for marker in ACCOUNT_ACTION_MARKERS)
+    execution_request = any(marker in text for marker in EXECUTION_MARKERS) or account_action_request
+    execution_target = "none"
+    if execution_request:
+        if account_action_request:
+            execution_target = "account"
+        elif tool_slug_hint or any(term in text for term in INTENT_ALIASES["tools"]):
+            execution_target = "tool"
+        else:
+            execution_target = "general"
 
     return {
         "intent_mode": mode,
         "topic": topic,
         "tutorial_mode": tutorial_mode,
         "tool_slug_hint": tool_slug_hint,
+        "execution_request": execution_request,
+        "execution_target": execution_target,
     }
 
 

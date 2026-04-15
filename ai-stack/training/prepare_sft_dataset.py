@@ -13,6 +13,42 @@ DEFAULT_SYSTEM_PROMPT = (
     "Jawab ringkas, akurat, conversational, dan jangan halusinasi URL."
 )
 
+EXECUTION_MARKERS = [
+    "jalankan",
+    "eksekusi",
+    "execute",
+    "run this",
+    "run it",
+    "do it for me",
+    "kerjakan untuk saya",
+    "process this",
+    "langsung proses",
+    "generate for me",
+    "buatkan hasil",
+]
+
+ACCOUNT_ACTION_MARKERS = [
+    "reset akun",
+    "hapus akun",
+    "delete account",
+    "refund",
+    "bayarin",
+    "charge",
+    "cancel subscription",
+    "ubah paket saya",
+    "change my plan",
+    "transfer saldo",
+]
+
+REFUSAL_TEMPLATE_ID = (
+    "Aiya gege, Xiao-An mode customer service ya, jadi tidak bisa mengeksekusi aksi secara langsung. "
+    "Xiao-An bisa kasih panduan langkah pakai atau arahkan ke tim manusia kalau perlu."
+)
+REFUSAL_TEMPLATE_EN = (
+    "Aiya gege, Xiao-An is in customer-service mode, so I cannot execute actions directly. "
+    "I can guide step-by-step usage or route you to the human team if needed."
+)
+
 
 def _normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
@@ -26,6 +62,44 @@ def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
             continue
         rows.append(json.loads(line))
     return rows
+
+
+def _detect_language(text: str) -> str:
+    lowered = _normalize_text(text).lower()
+    id_hits = sum(
+        1
+        for marker in ["apa", "bagaimana", "tolong", "saya", "aku", "fitur", "harga", "pakai", "cara", "kontak"]
+        if f" {marker} " in f" {lowered} "
+    )
+    en_hits = sum(
+        1
+        for marker in ["what", "how", "please", "i", "feature", "price", "use", "contact", "help"]
+        if f" {marker} " in f" {lowered} "
+    )
+    return "id" if id_hits >= en_hits else "en"
+
+
+def _is_execution_request(row: Dict[str, Any], message: str) -> bool:
+    intent = _normalize_text(str(row.get("intent_mode", ""))).lower()
+    if intent == "cs_blocked_execution":
+        return True
+    text = _normalize_text(message).lower()
+    if any(marker in text for marker in EXECUTION_MARKERS):
+        return True
+    if any(marker in text for marker in ACCOUNT_ACTION_MARKERS):
+        return True
+    return False
+
+
+def _build_refusal_answer(message: str, recommended_url: str) -> str:
+    language = _detect_language(message)
+    base = REFUSAL_TEMPLATE_ID if language == "id" else REFUSAL_TEMPLATE_EN
+    rec = _normalize_text(recommended_url)
+    if rec and rec not in base:
+        if language == "id":
+            return f"{base}\n\nLink bantuan: {rec}"
+        return f"{base}\n\nHelpful link: {rec}"
+    return base
 
 
 def _extract_target_answer(row: Dict[str, Any]) -> Optional[str]:
@@ -80,16 +154,25 @@ def _build_examples(
     inject_recommended_url: bool,
     min_user_chars: int,
     min_answer_chars: int,
+    augment_refusal: bool,
+    refusal_max_samples: int,
 ) -> List[Example]:
     out: List[Example] = []
     seen_pairs = set()
+    refusal_added = 0
 
     for row in rows:
         message = _normalize_text(str(row.get("message", "")))
         if len(message) < min_user_chars:
             continue
 
+        is_exec = _is_execution_request(row, message)
         target = _extract_target_answer(row)
+        if is_exec and augment_refusal:
+            target = _build_refusal_answer(message, str(row.get("recommended_url", "")))
+        if is_exec and augment_refusal and refusal_added >= max(0, refusal_max_samples):
+            target = None
+
         if not target:
             continue
         answer = _compose_assistant_answer(target, str(row.get("recommended_url", "")), inject_recommended_url)
@@ -112,14 +195,21 @@ def _build_examples(
                 messages=messages,
                 meta={
                     "id": str(row.get("id", "")).strip(),
-                    "source": str(row.get("source", "learning")).strip() or "learning",
+                    "source": ("synthetic_refusal" if (is_exec and augment_refusal) else str(row.get("source", "learning")).strip())
+                    or "learning",
                     "channel": str(row.get("channel", "")).strip(),
-                    "intent_mode": str(row.get("intent_mode", "")).strip(),
+                    "intent_mode": (
+                        "cs_blocked_execution"
+                        if (is_exec and augment_refusal)
+                        else str(row.get("intent_mode", "")).strip()
+                    ),
                     "rating": int(row.get("rating", 0) or 0),
                     "status": str(row.get("status", "")).strip(),
                 },
             )
         )
+        if is_exec and augment_refusal:
+            refusal_added += 1
     return out
 
 
@@ -157,6 +247,8 @@ def main() -> None:
     parser.add_argument("--min-answer-chars", type=int, default=8)
     parser.add_argument("--no-system-prompt", action="store_true")
     parser.add_argument("--inject-recommended-url", action="store_true")
+    parser.add_argument("--augment-refusal", action="store_true", help="Inject CS-only refusal targets for execute/action prompts")
+    parser.add_argument("--refusal-max-samples", type=int, default=1500)
     args = parser.parse_args()
 
     input_path = Path(args.input_jsonl).resolve()
@@ -170,6 +262,8 @@ def main() -> None:
         inject_recommended_url=bool(args.inject_recommended_url),
         min_user_chars=max(1, args.min_user_chars),
         min_answer_chars=max(1, args.min_answer_chars),
+        augment_refusal=bool(args.augment_refusal),
+        refusal_max_samples=max(0, args.refusal_max_samples),
     )
 
     if args.max_samples > 0 and len(examples) > args.max_samples:

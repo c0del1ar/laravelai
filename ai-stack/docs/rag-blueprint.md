@@ -50,6 +50,7 @@ Tujuan utama:
 - Tambah `confidence_score` + `sources` (citation ringan)
 - Jika confidence rendah: model minta klarifikasi, bukan menebak
 - Guardrail per channel (`web/openclaw/openai`) untuk panjang jawaban dan detail output
+- CS-only execution guardrail: AI tidak menjalankan tool/aksi akun/transaksi, hanya memberi panduan how-to atau handoff ke human team
 
 ## 2. Persona dan Respons
 
@@ -62,6 +63,7 @@ Aturan penting:
 - Jangan pernah mengaku "saya adalah website"
 - Bila ditanya identitas: jawab sebagai Xiao-An (assistant AryaKun)
 - Untuk pertanyaan umum/non-website: jawab normal tanpa memaksa link
+- Untuk permintaan "jalankan/eksekusi/do it for me": tolak eksekusi secara sopan, lanjutkan dengan tutorial atau arahkan ke human CS
 
 ## 3. Endpoint Kontrak
 
@@ -142,6 +144,7 @@ Model fallback + budget:
 - `GROQ_RETRY_BASE_DELAY_MS`
 - `LLM_MAX_INPUT_TOKENS`
 - `LOW_CONFIDENCE_THRESHOLD`
+- `CS_ONLY_MODE`
 
 Memory:
 - `MEMORY_STORE_PATH`
