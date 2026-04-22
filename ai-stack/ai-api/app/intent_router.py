@@ -16,12 +16,17 @@ INTENT_ALIASES: Dict[str, List[str]] = {
 
 EXECUTION_MARKERS = [
     "jalankan",
+    "jalanin",
     "eksekusi",
     "execute",
+    "run",
     "run this",
     "run it",
     "do it for me",
+    "please run",
+    "please execute",
     "tolong kerjakan",
+    "tolong jalankan",
     "kerjakan untuk saya",
     "process this",
     "langsung proses",
@@ -34,6 +39,7 @@ EXECUTION_MARKERS = [
 
 ACCOUNT_ACTION_MARKERS = [
     "reset akun",
+    "reset account",
     "hapus akun",
     "delete account",
     "refund",
@@ -57,6 +63,9 @@ def extract_tool_slug_hint(message: str) -> str:
     tokens = tokenize_for_search(text)
     if not tokens:
         return ""
+
+    if "no redirect" in text or "redirect checker" in text:
+        return "noredirect"
 
     direct = {"noredirect", "no-redirect", "redirectchecker", "redirect-checker"}
     for token in tokens:
@@ -105,7 +114,7 @@ def classify_intent_profile(message: str) -> Dict[str, Any]:
         topic = mode
 
     tutorial_mode = mode == "tutorial" or is_tutorial_intent(message)
-    tool_slug_hint = extract_tool_slug_hint(message) if tutorial_mode else ""
+    tool_slug_hint = extract_tool_slug_hint(message)
     account_action_request = any(marker in text for marker in ACCOUNT_ACTION_MARKERS)
     execution_request = any(marker in text for marker in EXECUTION_MARKERS) or account_action_request
     execution_target = "none"

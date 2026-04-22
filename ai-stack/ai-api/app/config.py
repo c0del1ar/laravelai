@@ -14,6 +14,18 @@ SEARCH_API_URL = os.getenv("SEARCH_API_URL", "")
 SEARCH_API_KEY = os.getenv("SEARCH_API_KEY", "")
 INTERNAL_INDEX_KEY = os.getenv("INTERNAL_INDEX_KEY", SEARCH_API_KEY)
 APP_LOG_LEVEL = os.getenv("APP_LOG_LEVEL", "INFO").strip().upper()
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+OPENAI_AUTH_MODE = os.getenv("OPENAI_AUTH_MODE", "api_key").strip().lower()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_OAUTH_ACCESS_TOKEN = os.getenv("OPENAI_OAUTH_ACCESS_TOKEN", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.1").strip()
+OPENAI_FALLBACK_MODELS = [
+    v.strip()
+    for v in os.getenv("OPENAI_FALLBACK_MODELS", "gpt-5.1,gpt-5-mini,gpt-5-nano").split(",")
+    if v.strip()
+]
+GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 GROQ_FALLBACK_MODELS = [
@@ -24,10 +36,11 @@ GROQ_FALLBACK_MODELS = [
     ).split(",")
     if v.strip()
 ]
-GROQ_RETRY_MAX_ATTEMPTS = int(os.getenv("GROQ_RETRY_MAX_ATTEMPTS", "3"))
-GROQ_RETRY_BASE_DELAY_MS = int(os.getenv("GROQ_RETRY_BASE_DELAY_MS", "350"))
+LLM_DEFAULT_MODEL = OPENAI_MODEL if LLM_PROVIDER == "openai" else GROQ_MODEL
+LLM_FALLBACK_MODELS = OPENAI_FALLBACK_MODELS if LLM_PROVIDER == "openai" else GROQ_FALLBACK_MODELS
+LLM_RETRY_MAX_ATTEMPTS = int(os.getenv("LLM_RETRY_MAX_ATTEMPTS", os.getenv("GROQ_RETRY_MAX_ATTEMPTS", "3")))
+LLM_RETRY_BASE_DELAY_MS = int(os.getenv("LLM_RETRY_BASE_DELAY_MS", os.getenv("GROQ_RETRY_BASE_DELAY_MS", "350")))
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "local-hash")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "256"))
@@ -92,9 +105,9 @@ AB_VARIANTS = [
     for v in os.getenv("AB_VARIANTS", "control,concise,advisor").split(",")
     if v.strip()
 ]
-AB_MODEL_CONTROL = os.getenv("AB_MODEL_CONTROL", GROQ_MODEL)
-AB_MODEL_CONCISE = os.getenv("AB_MODEL_CONCISE", GROQ_MODEL)
-AB_MODEL_ADVISOR = os.getenv("AB_MODEL_ADVISOR", GROQ_MODEL)
+AB_MODEL_CONTROL = os.getenv("AB_MODEL_CONTROL", LLM_DEFAULT_MODEL)
+AB_MODEL_CONCISE = os.getenv("AB_MODEL_CONCISE", LLM_DEFAULT_MODEL)
+AB_MODEL_ADVISOR = os.getenv("AB_MODEL_ADVISOR", LLM_DEFAULT_MODEL)
 
 OPENCLAW_WEBHOOK_KEY = os.getenv("OPENCLAW_WEBHOOK_KEY", "")
 OPENCLAW_COMPAT_API_KEY = os.getenv("OPENCLAW_COMPAT_API_KEY", "")

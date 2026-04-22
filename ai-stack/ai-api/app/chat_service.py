@@ -5,6 +5,7 @@ import re
 import time
 import uuid
 from typing import Any, Dict, List
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException, Request
@@ -15,7 +16,6 @@ from .config import (
     APP_LOG_LEVEL,
     CS_ONLY_MODE,
     CONTEXT_MAX_PAGES,
-    GROQ_API_KEY,
     HUMAN_HANDOFF_CONTACT_URL,
     HUMAN_HANDOFF_ENABLED,
     LOW_CONFIDENCE_THRESHOLD,
@@ -34,11 +34,12 @@ from .config import (
     STRICT_GROUNDING_REQUIRE_SOURCE,
 )
 from .experiments import choose_experiment_variant
+from .groq_client import get_llm_auth_setup_error
 from .handoff_state import handoff_state
 from .intent_router import classify_intent_profile, expand_queries_for_intent
 from .knowledge_base import kb
 from .learning_loop import learning_store
-from .llm import ask_groq_navigate, ask_groq_owner, not_found_response
+from .llm import ask_groq_navigate, not_found_response
 from .memory_store import memory_store
 from .nlp import (
     detect_language,
@@ -46,6 +47,8 @@ from .nlp import (
     is_identity_query,
     is_owner_query,
     is_smalltalk_intent,
+    normalize_text,
+    owner_response,
     should_handoff_to_human,
 )
 from .retrieval import (
@@ -74,11 +77,11 @@ _PHONE_TOKEN_RE = re.compile(r"(\+?\d{9,16})")
 def _clarification_answer(language: str) -> str:
     if language == "id":
         return (
-            "Aiya gege, Xiao-An butuh detail dikit biar jawabannya tepat ya. "
-            "Kamu lagi cari info fitur, pricing, artikel, atau panduan pakai tool tertentu?"
+            "Saya butuh detail tambahan agar jawabannya tepat. "
+            "Anda sedang mencari info fitur, pricing, artikel, atau panduan tool tertentu?"
         )
     return (
-        "Aiya gege, Xiao-An needs a bit more detail so the answer is accurate. "
+        "I need a bit more detail so the answer is accurate. "
         "Are you looking for features, pricing, article, or a specific tool tutorial?"
     )
 
@@ -86,11 +89,11 @@ def _clarification_answer(language: str) -> str:
 def _smalltalk_answer(language: str) -> str:
     if language == "id":
         return (
-            "Aiya gege, Xiao-An di sini kok. Kalau mau, kasih topik website AryaKun yang mau kamu cari "
-            "seperti pricing, tools, fitur, atau kontak, nanti Xiao-An bantu cepat ya."
+            "Saya Xiao-An. Jika Anda ingin, beri topik website Aryakun seperti pricing, tools, fitur, "
+            "atau kontak, lalu saya bantu arahkan dengan cepat."
         )
     return (
-        "Aiya gege, Xiao-An is here. If you want, tell me what you need from AryaKun website "
+        "I am Xiao-An. If you want, tell me what you need from the Aryakun website "
         "like pricing, tools, features, or contact, and I will guide you quickly."
     )
 
@@ -103,37 +106,267 @@ def _human_handoff_answer(language: str) -> str:
     if language == "id":
         if contact_url:
             return (
-                "Aiya gege, biar lebih cepat Xiao-An sambungkan ke tim manusia dulu ya. "
-                f"Kamu bisa lanjut lewat {contact_url}."
+                "Untuk kasus ini lebih cepat jika ditangani tim manusia. "
+                f"Silakan lanjut lewat {contact_url}."
             )
-        return "Aiya gege, biar lebih cepat Xiao-An sambungkan ke tim manusia dulu ya."
+        return "Untuk kasus ini lebih cepat jika ditangani tim manusia."
     if contact_url:
         return (
-            "Aiya gege, for this case Xiao-An will route you to the human team for faster help. "
+            "For this case, I will route you to the human team for faster help. "
             f"Please continue via {contact_url}."
         )
-    return "Aiya gege, for this case Xiao-An will route you to the human team for faster help."
+    return "For this case, I will route you to the human team for faster help."
 
 
 def _cs_execution_block_intro(language: str, target: str) -> str:
     if language == "id":
         if target == "account":
             return (
-                "Aiya gege, Xiao-An mode customer service ya, jadi tidak bisa mengubah akun/transaksi langsung. "
-                "Xiao-An bisa bantu arahkan langkah aman atau sambungkan ke tim manusia."
+                "Saya tidak bisa mengubah akun atau transaksi secara langsung dalam mode customer service. "
+                "Saya bisa bantu langkah aman atau menghubungkan ke tim manusia."
             )
         return (
-            "Aiya gege, Xiao-An mode customer service ya, jadi tidak bisa mengeksekusi tool atau aksi otomatis secara langsung. "
-            "Xiao-An bisa kasih panduan step-by-step sampai kamu bisa jalanin sendiri."
+            "Saya tidak bisa mengeksekusi tool atau aksi otomatis secara langsung dalam mode customer service. "
+            "Saya bisa memberikan panduan langkah demi langkah agar Anda bisa menjalankannya sendiri."
         )
     if target == "account":
         return (
-            "Aiya gege, Xiao-An is in customer-service mode, so I cannot directly change account or transaction data. "
+            "I am in customer-service mode, so I cannot directly change account or transaction data. "
             "I can guide safe steps or route you to the human team."
         )
     return (
-        "Aiya gege, Xiao-An is in customer-service mode, so I cannot directly execute tools or automated actions. "
+        "I am in customer-service mode, so I cannot directly execute tools or automated actions. "
         "I can provide step-by-step guidance so you can run it yourself."
+    )
+
+
+_EXECUTION_HINTS = [
+    "jalankan",
+    "eksekusi",
+    "execute",
+    "run this",
+    "run it",
+    "run ",
+    "do it for me",
+    "please do it",
+    "tolong kerjakan",
+    "kerjakan untuk saya",
+    "proses sekarang",
+    "langsung proses",
+    "cekkan",
+    "checkkan",
+    "buatkan hasil",
+    "generate for me",
+]
+_ACCOUNT_HINTS = [
+    "akun",
+    "account",
+    "subscription",
+    "langganan",
+    "refund",
+    "reset",
+    "hapus akun",
+    "delete account",
+    "change my plan",
+]
+_TOOL_HINTS = ["tool", "tools", "checker", "generator", "utility", "noredirect", "redirect checker"]
+_EXECUTION_CLAIM_HINTS = [
+    "saya dapat membantu anda menjalankan",
+    "i can run",
+    "i can execute",
+    "i can process that for you",
+]
+
+
+def _path_part(url: str) -> str:
+    value = str(url or "").strip()
+    if not value:
+        return ""
+    if value.startswith("http://") or value.startswith("https://"):
+        value = urlparse(value).path
+    value = "/" + value.lstrip("/")
+    return value.rstrip("/") or "/"
+
+
+def _looks_like_execution_request(message: str) -> bool:
+    text = normalize_text(message)
+    if not text:
+        return False
+    if any(marker in text for marker in _EXECUTION_HINTS):
+        return True
+    return (("tolong" in text) or ("please" in text)) and any(v in text for v in ["run", "jalankan", "execute", "kerjakan", "proses"])
+
+
+def _infer_execution_target(message: str, tutorial_mode: bool) -> str:
+    text = normalize_text(message)
+    if any(marker in text for marker in _ACCOUNT_HINTS):
+        return "account"
+    if tutorial_mode or any(marker in text for marker in _TOOL_HINTS):
+        return "tool"
+    return "general"
+
+
+def _upsert_source_for_url(
+    result: Dict[str, Any],
+    target_url: str,
+    context_pages: List[Dict[str, Any]],
+    site_catalog: List[Dict[str, Any]],
+    tool_manifests: List[Dict[str, Any]],
+) -> None:
+    url = str(target_url or "").strip()
+    if not url:
+        return
+    target_path = _path_part(url)
+    if not target_path:
+        return
+
+    sources = result.get("sources", [])
+    if not isinstance(sources, list):
+        sources = []
+    for item in sources:
+        if not isinstance(item, dict):
+            continue
+        if _path_part(str(item.get("url", "")).strip()) == target_path:
+            result["sources"] = sources
+            return
+
+    for item in context_pages:
+        if not isinstance(item, dict):
+            continue
+        source_url = str(item.get("url", "")).strip()
+        if _path_part(source_url) != target_path:
+            continue
+        sources.insert(
+            0,
+            {
+                "title": str(item.get("title", "")).strip() or source_url,
+                "url": source_url,
+                "source": str(item.get("source", "")).strip() or "context",
+                "snippet": (str(item.get("summary", "")).strip() or str(item.get("content", "")).strip())[:180],
+            },
+        )
+        result["sources"] = sources[:3]
+        return
+
+    for item in tool_manifests:
+        if not isinstance(item, dict):
+            continue
+        source_url = str(item.get("url", "")).strip()
+        if _path_part(source_url) != target_path:
+            continue
+        sources.insert(
+            0,
+            {
+                "title": str(item.get("name", "")).strip() or source_url,
+                "url": source_url,
+                "source": "tool-manifest",
+                "snippet": str(item.get("description", "")).strip()[:180],
+            },
+        )
+        result["sources"] = sources[:3]
+        return
+
+    for item in site_catalog:
+        if not isinstance(item, dict):
+            continue
+        source_url = str(item.get("url", "")).strip()
+        if _path_part(source_url) != target_path:
+            continue
+        sources.insert(
+            0,
+            {
+                "title": str(item.get("title", "")).strip() or source_url,
+                "url": source_url,
+                "source": "catalog-structured",
+                "snippet": str(item.get("section", "")).strip(),
+            },
+        )
+        result["sources"] = sources[:3]
+        return
+
+
+def _find_preferred_url(
+    *,
+    context_pages: List[Dict[str, Any]],
+    site_catalog: List[Dict[str, Any]],
+    tool_manifests: List[Dict[str, Any]],
+    path_hints: List[str],
+) -> str:
+    hints = [h.strip().lower() for h in path_hints if h.strip()]
+    if not hints:
+        return ""
+
+    candidates: List[str] = []
+    for item in tool_manifests:
+        if isinstance(item, dict):
+            candidates.append(str(item.get("url", "")).strip())
+    for item in context_pages:
+        if isinstance(item, dict):
+            candidates.append(str(item.get("url", "")).strip())
+    for item in site_catalog:
+        if isinstance(item, dict):
+            candidates.append(str(item.get("url", "")).strip())
+
+    seen: set[str] = set()
+    cleaned: List[str] = []
+    for url in candidates:
+        if not url:
+            continue
+        path = _path_part(url)
+        key = f"{path}|{url}"
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(url)
+
+    for hint in hints:
+        for url in cleaned:
+            if hint in _path_part(url).lower():
+                return url
+    return ""
+
+
+def _intent_url_policy(
+    *,
+    intent_mode: str,
+    tutorial_mode: bool,
+    intent_profile: Dict[str, Any],
+    context_pages: List[Dict[str, Any]],
+    site_catalog: List[Dict[str, Any]],
+    tool_manifests: List[Dict[str, Any]],
+) -> str:
+    if tutorial_mode and tool_manifests:
+        primary = str(tool_manifests[0].get("url", "")).strip()
+        if primary:
+            return primary
+
+    tool_slug_hint = str(intent_profile.get("tool_slug_hint", "")).strip()
+    if tool_slug_hint:
+        found = _find_preferred_url(
+            context_pages=context_pages,
+            site_catalog=site_catalog,
+            tool_manifests=tool_manifests,
+            path_hints=[f"/tools/{tool_slug_hint}", f"/tool/{tool_slug_hint}"],
+        )
+        if found:
+            return found
+
+    intent_hints = {
+        "contact": ["/contact", "/support", "/kontak"],
+        "pricing": ["/pricing", "/plans", "/plan"],
+        "blog": ["/blog", "/blogs", "/articles"],
+        "product": ["/products", "/product", "/services", "/layanan"],
+        "tools": ["/tools"],
+        "tutorial": ["/tools"],
+        "about": ["/about", "/profile", "/@arya", "/@aryachan"],
+        "owner": ["/about", "/profile", "/@arya", "/@aryachan"],
+    }
+    hints = intent_hints.get(intent_mode, [])
+    return _find_preferred_url(
+        context_pages=context_pages,
+        site_catalog=site_catalog,
+        tool_manifests=tool_manifests,
+        path_hints=hints,
     )
 
 
@@ -280,7 +513,7 @@ def _format_tutorial_fallback(manifest: Dict[str, Any], language: str) -> str:
         field_lines.append(f"- {label} [{ftype}] ({req})")
 
     if language == "id":
-        parts = [f"Aiya gege, ini cara pakai {name} ya."]
+        parts = [f"Tutorial penggunaan {name}:"]
         if pb_what:
             parts.append("Fungsi: " + pb_what)
         elif desc:
@@ -308,10 +541,10 @@ def _format_tutorial_fallback(manifest: Dict[str, Any], language: str) -> str:
             parts.append("Output: " + output)
         if pb_troubleshoot:
             parts.append("Troubleshooting:\n" + "\n".join(f"- {v}" for v in pb_troubleshoot[:5]))
-        parts.append("Kalau ada field/tool detail yang belum jelas, Xiao-An kasih versi dasar dulu dari data yang tersedia.")
+        parts.append("Jika ada detail yang belum lengkap, saya memakai data manifest tool yang tersedia saat ini.")
         return "\n\n".join(parts)
 
-    parts = [f"Aiya gege, here is how to use {name}."]
+    parts = [f"How to use {name}:"]
     if pb_what:
         parts.append("What it does: " + pb_what)
     elif desc:
@@ -339,7 +572,7 @@ def _format_tutorial_fallback(manifest: Dict[str, Any], language: str) -> str:
         parts.append("Output: " + output)
     if pb_troubleshoot:
         parts.append("Troubleshooting:\n" + "\n".join(f"- {v}" for v in pb_troubleshoot[:5]))
-    parts.append("If some details are missing, Xiao-An is using the best available tool manifest data.")
+    parts.append("If some details are missing, I am using the best available tool manifest data.")
     return "\n\n".join(parts)
 
 
@@ -442,14 +675,16 @@ async def generate_chat_response(
             grounded=grounded,
         )
 
-    if not GROQ_API_KEY:
-        raise HTTPException(status_code=500, detail="GROQ_API_KEY is not configured")
+    auth_error = get_llm_auth_setup_error()
+    if auth_error:
+        raise HTTPException(status_code=500, detail=auth_error)
 
     merged_history = await memory_store.merge_with_request_history(user_id or "", channel, history)
     language = detect_language(message, merged_history)
     intent_profile = classify_intent_profile(message)
     intent_mode = str(intent_profile.get("intent_mode", "navigation"))
     tutorial_mode = bool(intent_profile.get("tutorial_mode", False))
+    execution_requested = bool(intent_profile.get("execution_request", False)) or _looks_like_execution_request(message)
     experiment_variant, experiment_model = choose_experiment_variant(user_id or "", channel)
 
     if kb.page_count == 0:
@@ -462,20 +697,13 @@ async def generate_chat_response(
         asyncio.create_task(kb.crawl())
 
     if is_owner_query(message):
-        try:
-            result = await ask_groq_owner(message, merged_history, language)
-            result["intent_mode"] = "owner"
-            result = apply_channel_guardrails(result, channel)
-            await memory_store.add_turn(user_id or "", channel, message, str(result.get("answer", "")))
-            await _record(True, 0.92, 0, str(result.get("reason", "")), intent="owner")
-            return result
-        except Exception:
-            fallback = not_found_response(language)
-            fallback["intent_mode"] = "owner"
-            fallback = apply_channel_guardrails(fallback, channel)
-            await memory_store.add_turn(user_id or "", channel, message, str(fallback.get("answer", "")))
-            await _record(False, 0.22, 0, "owner route fallback", intent="owner")
-            return fallback
+        result = owner_response(language)
+        result["intent_mode"] = "owner"
+        result["confidence_score"] = 0.95
+        result = apply_channel_guardrails(result, channel)
+        await memory_store.add_turn(user_id or "", channel, message, str(result.get("answer", "")))
+        await _record(True, 0.95, 0, str(result.get("reason", "")), intent="owner")
+        return result
 
     if is_identity_query(message):
         result = identity_response(language)
@@ -503,8 +731,10 @@ async def generate_chat_response(
         await _record(True, 0.96, 0, "handoff keyword", intent="handoff", variant=experiment_variant, handoff=True)
         return result
 
-    if CS_ONLY_MODE and bool(intent_profile.get("execution_request", False)):
-        execution_target = str(intent_profile.get("execution_target", "general")).strip() or "general"
+    if CS_ONLY_MODE and execution_requested:
+        execution_target = str(intent_profile.get("execution_target", "none")).strip() or "none"
+        if execution_target == "none":
+            execution_target = _infer_execution_target(message, tutorial_mode)
         intro = _cs_execution_block_intro(language, execution_target)
         block_result: Dict[str, Any] = {
             "answer": intro,
@@ -558,6 +788,9 @@ async def generate_chat_response(
                             "snippet": str(primary.get("description", "")).strip()[:180],
                         }
                     ]
+            else:
+                block_result["recommended_type"] = "tool"
+                block_result["recommended_url"] = "/tools"
 
         block_result = apply_channel_guardrails(block_result, channel)
         await memory_store.add_turn(user_id or "", channel, message, str(block_result.get("answer", "")))
@@ -698,15 +931,65 @@ async def generate_chat_response(
         if tutorial_mode and tool_manifests:
             primary = tool_manifests[0]
             primary_url = str(primary.get("url", "")).strip()
-            if primary_url and not str(result.get("recommended_url", "")).strip():
+            if primary_url:
                 result["recommended_url"] = primary_url
                 result["recommended_type"] = "tool"
-
-            answer = str(result.get("answer", "")).strip()
-            if not _answer_has_tutorial_shape(answer, language):
-                result["answer"] = _format_tutorial_fallback(primary, language)
-                result["reason"] = (str(result.get("reason", "")).strip() + " Tutorial template fallback from tool manifest.").strip()
+            result["answer"] = _format_tutorial_fallback(primary, language)
+            result["reason"] = (str(result.get("reason", "")).strip() + " Tutorial response normalized from tool manifest.").strip()
             result["confidence_score"] = max(float(result.get("confidence_score", 0.0)), 0.62)
+            _upsert_source_for_url(result, str(result.get("recommended_url", "")).strip(), context_pages, site_catalog, tool_manifests)
+
+        policy_url = _intent_url_policy(
+            intent_mode=intent_mode,
+            tutorial_mode=tutorial_mode,
+            intent_profile=intent_profile,
+            context_pages=context_pages,
+            site_catalog=site_catalog,
+            tool_manifests=tool_manifests,
+        )
+        if policy_url:
+            current_url = str(result.get("recommended_url", "")).strip()
+            if not current_url or (_path_part(policy_url) not in _path_part(current_url)):
+                result["recommended_url"] = policy_url
+                if intent_mode in {"tutorial", "tools"}:
+                    result["recommended_type"] = "tool"
+                elif intent_mode in {"contact", "pricing", "blog", "product", "about"}:
+                    result["recommended_type"] = "page"
+            _upsert_source_for_url(result, str(result.get("recommended_url", "")).strip(), context_pages, site_catalog, tool_manifests)
+
+        answer_norm = normalize_text(str(result.get("answer", "")))
+        if CS_ONLY_MODE and (execution_requested or any(hint in answer_norm for hint in _EXECUTION_CLAIM_HINTS)):
+            execution_target = str(intent_profile.get("execution_target", "none")).strip() or "none"
+            if execution_target == "none":
+                execution_target = _infer_execution_target(message, tutorial_mode)
+            blocked_intro = _cs_execution_block_intro(language, execution_target)
+            result["answer"] = blocked_intro
+            result["recommended_type"] = "none"
+            result["recommended_url"] = ""
+            result["related_items"] = []
+            result["intent_mode"] = "cs_blocked_execution"
+            intent_mode = "cs_blocked_execution"
+            result["reason"] = (str(result.get("reason", "")).strip() + " cs-only post-guard blocked execution phrasing.").strip()
+            result["confidence_score"] = max(0.88, float(result.get("confidence_score", 0.0) or 0.0))
+            if execution_target == "account" and HUMAN_HANDOFF_CONTACT_URL:
+                result["recommended_type"] = "page"
+                result["recommended_url"] = str(HUMAN_HANDOFF_CONTACT_URL or "").strip()
+                result["answer"] = (blocked_intro + " " + _human_handoff_answer(language)).strip()
+            if execution_target == "tool":
+                if tool_manifests:
+                    primary = tool_manifests[0]
+                    tool_url = str(primary.get("url", "")).strip()
+                    result["answer"] = (blocked_intro + "\n\n" + _format_tutorial_fallback(primary, language)).strip()
+                    if tool_url:
+                        result["recommended_type"] = "tool"
+                        result["recommended_url"] = tool_url
+                elif policy_url:
+                    result["recommended_type"] = "tool"
+                    result["recommended_url"] = policy_url
+                else:
+                    result["recommended_type"] = "tool"
+                    result["recommended_url"] = "/tools"
+            _upsert_source_for_url(result, str(result.get("recommended_url", "")).strip(), context_pages, site_catalog, tool_manifests)
 
         confidence_now = float(result.get("confidence_score", 0.0) or 0.0)
         low_conf = confidence_now < LOW_CONFIDENCE_THRESHOLD and not tutorial_mode

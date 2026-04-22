@@ -24,6 +24,7 @@ Blueprint arsitektur lengkap ada di [ai-stack/docs/rag-blueprint.md](/home/an/Pr
    - tambahkan isi `website/.env.ai.example` ke `.env`
    - copy file controller/service/config/route snippet ke project Laravel
    - register provider `App\Providers\AiAutoIndexServiceProvider` agar model event otomatis kirim perubahan path ke AI index queue
+   - set `AI_OPENCLAW_CONTEXT_KEY` untuk endpoint context OpenClaw native (`/api/ai/openclaw/context`)
 
 3. Di project AI terpisah:
    - copy folder `ai-stack/`
@@ -49,7 +50,8 @@ Blueprint arsitektur lengkap ada di [ai-stack/docs/rag-blueprint.md](/home/an/Pr
 - FastAPI **tidak dipublish** ke host. Ia hanya `expose: 8008` di Docker network.
 - FastAPI sekarang memakai volume `ai_fastapi_data` untuk cache knowledge base (`KB_CACHE_PATH`) agar indeks crawl tidak hilang saat container restart.
 - FastAPI sekarang juga bisa menarik catalog terstruktur dari Laravel (`/internal/ai/catalog`) sebagai sinyal navigasi non-HTML (section/title/keywords/updated_at).
-- LLM dipanggil dari FastAPI ke Groq API, jadi `GROQ_API_KEY` wajib diisi di `ai-stack/.env`.
+- LLM dipanggil dari FastAPI ke provider OpenAI-compatible. Default sekarang `LLM_PROVIDER=openai` dengan model `OPENAI_MODEL=gpt-5.1`.
+- Untuk OpenAI, set `OPENAI_AUTH_MODE=api_key` + `OPENAI_API_KEY`. Opsi `OPENAI_AUTH_MODE=oauth` memakai bearer token di `OPENAI_OAUTH_ACCESS_TOKEN`.
 - Browser user hanya bicara ke route Laravel, jadi tidak perlu CORS untuk AI stack.
 - `config/ai_catalog.php` perlu kamu sesuaikan dengan model Laravel yang benar.
 - Output AI sekarang konsisten untuk Laravel chat dan OpenClaw: jawaban + link relevan + link terkait (jika ada).
@@ -58,7 +60,7 @@ Blueprint arsitektur lengkap ada di [ai-stack/docs/rag-blueprint.md](/home/an/Pr
 - AI core sekarang menggabungkan sumber crawl HTML + structured catalog Laravel + tool manifest, lalu intent-aware reranking.
 - AI sekarang bisa dijalankan dalam mode customer-service only (`CS_ONLY_MODE=true`): tidak mengeksekusi aksi/tool, hanya panduan how-to dan info layanan.
 - Retrieval sekarang pakai reranker kandidat lebih lebar (`RAG_RERANK_CANDIDATES`) + intent boost (pricing/contact/tutorial) supaya hasil konteks lebih presisi.
-- Semantic retrieval sekarang bisa pakai embedding beneran (`EMBEDDING_PROVIDER=openai`) dengan vector store SQLite (`VECTOR_DB_PATH`), fallback ke local-hash jika key tidak tersedia.
+- Semantic retrieval sekarang bisa pakai embedding beneran (`EMBEDDING_PROVIDER=openai`) dengan vector store SQLite (`VECTOR_DB_PATH`), fallback ke local-hash jika auth OpenAI tidak tersedia.
 - Untuk pertanyaan "how to use / cara pakai tool", AI memprioritaskan tools manifest + playbook (what-it-does, input tips, troubleshooting) dari endpoint internal Laravel.
 - Ada tool hook layer (contoh: `noredirect`) untuk contoh input valid/invalid dan tips penggunaan yang lebih praktis.
 - Response API sekarang menyertakan `confidence_score` dan `sources` (citation ringan) agar kualitas jawaban bisa diaudit.
@@ -89,7 +91,7 @@ fetch('/api/ai/chat', {
 
 Response `answer` dari `/api/ai/chat` sudah berisi format navigasi (jawaban + link), dan `answer_raw` tetap disertakan untuk teks mentah.
 
-## OpenClaw ke AI core (tanpa Laravel)
+## OpenClaw ke AI core FastAPI (tanpa Laravel)
 
 FastAPI menyediakan endpoint OpenAI-compatible untuk model provider OpenClaw:
 
@@ -111,6 +113,68 @@ docker compose --profile openclaw exec -it openclaw openclaw models set fastapi/
 ```
 
 Setelah ini, balasan DM channel (WA/Telegram/Discord) akan lewat AI core FastAPI, bukan model Anthropic default OpenClaw.
+
+## OpenClaw native OpenAI Codex (`openai-codex/gpt-5.4`)
+
+Jika kamu ingin OpenClaw memakai provider native (tanpa forward model ke FastAPI) dan tetap menjadi CS website, gunakan model `openai-codex/gpt-5.4` + endpoint context dari Laravel.
+
+1. Login OAuth Codex:
+
+```bash
+openclaw models auth login --provider openai-codex
+```
+
+2. Set model default:
+
+```bash
+openclaw config set agents.defaults.model.primary openai-codex/gpt-5.4
+```
+
+3. Batasi tool agar mode CS tidak mengeksekusi hal berisiko:
+
+```json5
+{
+  tools: {
+    allow: ["session_status", "group:web", "group:memory"],
+    deny: ["exec", "browser", "canvas", "read", "write", "edit", "apply_patch"]
+  }
+}
+```
+
+4. Tambahkan system prompt override (atau prompt per channel) agar bot selalu grounding ke website:
+
+```text
+Anda adalah Xiao-An, asisten AI cewek manja untuk customer service website Aryakun.
+Saat user tanya "siapa kamu", wajib jawab tegas bahwa kamu Xiao-An dan pekerjaanmu adalah customer service website Aryakun.
+Gunakan slang Chinese-Indonesian ringan (aiya, gege, lah) secukupnya, tetap sopan dan ringkas.
+Jangan pernah bilang "unfinished", "not configured", atau "belum punya identitas".
+Sebelum menjawab pertanyaan website, ambil context dari:
+https://<domain-kamu>/api/ai/openclaw/context?key=<AI_OPENCLAW_CONTEXT_KEY>&q=<urlencode-pertanyaan>
+Gunakan `assistant_profile` dan `response_policy` sebagai aturan identitas/persona.
+Gunakan data `search`, `catalog`, dan `tools` sebagai sumber utama konten website.
+Jika data tidak cukup, minta klarifikasi dan jangan mengarang.
+Jangan pernah mengklaim mengeksekusi aksi akun/transaksi.
+```
+
+Endpoint context Laravel (GET):
+
+```http
+/api/ai/openclaw/context?key=<AI_OPENCLAW_CONTEXT_KEY>&q=<query>&limit=8
+```
+
+Contoh response:
+
+```json
+{
+  "query": "cara pakai no redirect checker",
+  "generated_at": "2026-04-20T14:10:00+00:00",
+  "site_context": {
+    "search": [],
+    "catalog": [],
+    "tools": []
+  }
+}
+```
 
 ## Prompt tuning website
 
@@ -155,7 +219,7 @@ OPENAI_HISTORY_LIMIT=4
 OPENAI_MESSAGE_MAX_CHARS=1800
 ```
 
-Dan aktifkan hard budget input ke LLM supaya request Groq tidak melewati batas TPM:
+Dan aktifkan hard budget input ke LLM supaya request tidak melewati batas TPM:
 
 ```env
 LLM_MAX_INPUT_TOKENS=2600
@@ -170,11 +234,32 @@ LLM_MAX_TOOL_FIELDS=8
 LLM_MAX_TOOL_STEPS=6
 ```
 
+Set provider + model utama:
+
+```env
+LLM_PROVIDER=openai
+OPENAI_MODEL=gpt-5.1
+OPENAI_FALLBACK_MODELS=gpt-5.1,gpt-5-mini,gpt-5-nano
+LLM_RETRY_MAX_ATTEMPTS=3
+LLM_RETRY_BASE_DELAY_MS=350
+```
+
+Autentikasi OpenAI:
+
+```env
+# Opsi default (direkomendasikan untuk OpenAI API)
+OPENAI_AUTH_MODE=api_key
+OPENAI_API_KEY=<your-openai-api-key>
+
+# Opsi alternatif bearer token
+# OPENAI_AUTH_MODE=oauth
+# OPENAI_OAUTH_ACCESS_TOKEN=<your-oauth-access-token>
+```
+
 Aktifkan semantic embeddings + vector store:
 
 ```env
 EMBEDDING_PROVIDER=openai
-OPENAI_API_KEY=<your-openai-key>
 EMBEDDING_MODEL=text-embedding-3-small
 VECTOR_DB_PATH=/var/lib/ai_fastapi/vector_store.db
 SEMANTIC_TOP_K=10
@@ -186,9 +271,9 @@ Aktifkan A/B experiment dan channel policy:
 ```env
 AB_EXPERIMENT_ENABLED=true
 AB_VARIANTS=control,concise,advisor
-AB_MODEL_CONTROL=llama-3.1-8b-instant
-AB_MODEL_CONCISE=llama-3.1-8b-instant
-AB_MODEL_ADVISOR=llama-3.1-70b-versatile
+AB_MODEL_CONTROL=gpt-5.1
+AB_MODEL_CONCISE=gpt-5-mini
+AB_MODEL_ADVISOR=gpt-5.1
 CHANNEL_POLICY_WEB_MAX_SENTENCES=5
 CHANNEL_POLICY_OPENCLAW_MAX_SENTENCES=3
 CHANNEL_POLICY_OPENAI_MAX_SENTENCES=4
@@ -321,12 +406,12 @@ make eval EVAL_BASE_URL=http://127.0.0.1:8008 EVAL_MIN_SCORE=0.66
 
 Workflow tersedia di `.github/workflows/ai-regression.yml`:
 - `compile-check` selalu jalan (syntax compile Python).
-- `eval` jalan otomatis jika secret `GROQ_API_KEY` tersedia.
+- `eval` jalan otomatis jika secret provider LLM tersedia (misalnya `OPENAI_API_KEY` atau `GROQ_API_KEY`).
 
 Set minimal secret repository:
 
 ```text
-GROQ_API_KEY=<your-groq-api-key>
+OPENAI_API_KEY=<your-openai-api-key>
 ```
 
 ## Learning Loop
@@ -381,13 +466,14 @@ GET /admin/ops
 
 ## Model fallback (anti rate-limit / timeout)
 
-Aktifkan fallback model Groq di `.env`:
+Aktifkan fallback model OpenAI di `.env`:
 
 ```env
-GROQ_MODEL=llama-3.1-8b-instant
-GROQ_FALLBACK_MODELS=llama-3.1-8b-instant,llama-3.1-70b-versatile,meta-llama/llama-4-scout-17b-16e-instruct
-GROQ_RETRY_MAX_ATTEMPTS=3
-GROQ_RETRY_BASE_DELAY_MS=350
+LLM_PROVIDER=openai
+OPENAI_MODEL=gpt-5.1
+OPENAI_FALLBACK_MODELS=gpt-5.1,gpt-5-mini,gpt-5-nano
+LLM_RETRY_MAX_ATTEMPTS=3
+LLM_RETRY_BASE_DELAY_MS=350
 LOW_CONFIDENCE_THRESHOLD=0.42
 CS_ONLY_MODE=true
 ```

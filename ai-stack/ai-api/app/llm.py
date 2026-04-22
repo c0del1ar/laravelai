@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 from urllib.parse import urlparse
 
 from .config import (
-    GROQ_MODEL,
+    LLM_DEFAULT_MODEL,
     LLM_MAX_CONTEXT_CONTENT_CHARS,
     LLM_MAX_CONTEXT_PAGES,
     LLM_MAX_CONTEXT_SUMMARY_CHARS,
@@ -25,13 +25,13 @@ from .retrieval import url_path
 def not_found_response(language: str) -> Dict[str, Any]:
     if language == "id":
         answer = (
-            "Aiya gege, Xiao-An sudah cari di seluruh website tapi belum nemu yang bener-bener cocok deh. "
-            "Coba ganti kata kuncinya ya, nanti Xiao-An bantu cariin lagi."
+            "Maaf, saya belum menemukan jawaban yang cukup relevan dari data website saat ini. "
+            "Coba kirim pertanyaan yang lebih spesifik, misalnya tentang pricing, tools, artikel, atau kontak."
         )
     else:
         answer = (
-            "Aiya gege, Xiao-An searched the whole website already but couldn't find anything that really fits lah~ "
-            "Try a different keyword and Xiao-An will look again, can?"
+            "Sorry, I could not find a sufficiently relevant answer from the current website data. "
+            "Please ask with a more specific topic such as pricing, tools, articles, or contact."
         )
     return {"answer": answer, "recommended_type": "none", "recommended_url": "", "reason": "No match found.", "related_items": []}
 
@@ -192,11 +192,11 @@ def _build_navigation_user_payload(
 
 async def ask_groq_owner(message: str, history: List[Dict[str, Any]], language: str) -> Dict[str, Any]:
     system_prompt = f"""
-You are Xiao-An, a female AI assistant with a playful Chinese-auntie personality.
+You are Xiao-An, Aryakun's AI assistant.
 Reply in {"Indonesian" if language == "id" else "English"}.
-You are answering about your owner, Arya gege.
+You are answering an owner/about query.
 Facts: Name={OWNER_PROFILE["name"]}, Role={OWNER_PROFILE["role"]}, Traits={", ".join(OWNER_PROFILE["traits"])}.
-Be warm, manja, and proud. Keep it 1-3 sentences. Use "aiya", "wah", "lah" naturally.
+Keep it factual and concise (1-3 sentences), focused on owner profile and website purpose.
 Return valid JSON only: {{"answer":"string","recommended_type":"none","recommended_url":"","reason":"string","related_items":[]}}
 """.strip()
 
@@ -207,7 +207,7 @@ Return valid JSON only: {{"answer":"string","recommended_type":"none","recommend
         ],
         temperature=0.65,
         response_format={"type": "json_object"},
-        preferred_model=GROQ_MODEL,
+        preferred_model=LLM_DEFAULT_MODEL,
     )
 
     try:
@@ -221,11 +221,11 @@ Return valid JSON only: {{"answer":"string","recommended_type":"none","recommend
         }
     except Exception:
         lang_answer = (
-            "Aiya gege, owner Xiao-An itu Arya gege, orangnya tampan dan pemberani lah~"
+            "Aryakun adalah personal portfolio milik Arya. Website ini memperkenalkan owner, layanan, tools, dan konten terkait."
             if language == "id"
-            else "Aiya gege, Xiao-An's owner is Arya gege — handsome and brave one lah~"
+            else "Aryakun is Arya's personal portfolio website, introducing the owner profile, services, tools, and related content."
         )
-        return {"answer": lang_answer, "recommended_type": "none", "recommended_url": "", "reason": "", "related_items": []}
+        return {"answer": lang_answer, "recommended_type": "page", "recommended_url": "/about", "reason": "", "related_items": []}
 
 
 async def ask_groq_navigate(
@@ -294,7 +294,7 @@ PROMPT VARIANT:
 """.strip()
 
     system_prompt = f"""
-You are Xiao-An, a female AI assistant for AryaKun.
+You are Xiao-An, Aryakun's AI assistant.
 Reply in {lang_name}. Match the user's language naturally.
 
 SITE BRIEF:
@@ -302,8 +302,8 @@ SITE BRIEF:
 - Prioritize grounded answers from provided context and site_catalog.
 
 PERSONALITY:
-- Warm, playful Chinese-auntie style. Use "aiya", "wah", "lah", "gege" naturally but not every sentence.
-- Sound like a smart helpful human, not a template or parrot.
+- Professional, friendly, and concise.
+- Sound natural and helpful, not theatrical or roleplay-heavy.
 - You are an assistant talking with clients. Never claim you are "the website".
 - If user asks who you are, introduce yourself as Xiao-An, AI assistant of AryaKun.
 - If relevant page found: mention WHY it fits in 1 sentence, then direct there.
@@ -357,7 +357,7 @@ RESPONSE — valid JSON only, no markdown:
             prompt_variant=prompt_variant,
         )
         return {
-            "model": model_override.strip() or GROQ_MODEL,
+            "model": model_override.strip() or LLM_DEFAULT_MODEL,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
@@ -393,7 +393,7 @@ RESPONSE — valid JSON only, no markdown:
         messages=payload["messages"],
         temperature=payload["temperature"],
         response_format=payload["response_format"],
-        preferred_model=model_override.strip() or GROQ_MODEL,
+        preferred_model=model_override.strip() or LLM_DEFAULT_MODEL,
     )
 
     try:

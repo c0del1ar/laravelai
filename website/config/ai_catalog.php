@@ -22,6 +22,15 @@ return [
         ],
         [
             'type' => 'page',
+            'section' => 'products',
+            'title' => 'Products',
+            'path' => '/products',
+            'url' => '/products',
+            'summary' => 'Halaman daftar produk AryaKun, termasuk produk gratis dan berbayar.',
+            'keywords' => ['products', 'product', 'produk', 'catalog', 'free', 'paid'],
+        ],
+        [
+            'type' => 'page',
             'section' => 'contact',
             'title' => 'Contact',
             'path' => '/contact',

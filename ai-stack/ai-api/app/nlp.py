@@ -202,14 +202,25 @@ def is_smalltalk_intent(message: str) -> bool:
 
 
 OWNER_MARKERS = [
-    "owner", "lord", "master", "creator", "founder", "maker", "boss",
-    "pemilik", "tuan", "majikan", "pencipta", "pembuat", "siapa arya",
-    "siapa owner", "siapa tuan", "siapa pemilik", "who is arya", "who is your owner",
+    "owner",
+    "founder",
+    "creator",
+    "pemilik",
+    "pembuat",
+    "siapa arya",
+    "siapa aryakun",
+    "aryakun siapa",
+    "who is arya",
+    "who is aryakun",
+    "who owns aryakun",
+    "about aryakun",
+    "tentang aryakun",
+    "profil aryakun",
 ]
 OWNER_PROFILE = {
-    "name": "Arya gege",
-    "role": "owner and lord of Xiao-An",
-    "traits": ["handsome", "brave", "charismatic", "confident"],
+    "name": "Arya (Aryakun)",
+    "role": "owner and founder of Aryakun personal portfolio website",
+    "traits": ["technical", "security-focused", "product-oriented"],
 }
 IDENTITY_MARKERS = [
     "siapa kamu", "kamu siapa", "who are you", "what are you",
@@ -220,7 +231,11 @@ IDENTITY_MARKERS = [
 
 def is_owner_query(message: str) -> bool:
     q = normalize_text(message)
-    return any(m in q for m in OWNER_MARKERS)
+    if any(m in q for m in OWNER_MARKERS):
+        return True
+    asks_profile = any(marker in q for marker in ["siapa", "who is", "tentang", "about", "profil"])
+    mentions_aryakun = "aryakun" in q or " arya " in f" {q} "
+    return asks_profile and mentions_aryakun
 
 
 def is_identity_query(message: str) -> bool:
@@ -231,13 +246,13 @@ def is_identity_query(message: str) -> bool:
 def identity_response(language: str) -> Dict[str, Any]:
     if language == "id":
         answer = (
-            "Aiya gege, Xiao-An ini asisten AI milik AryaKun lah. "
-            "Xiao-An bantu jawab pertanyaan client tentang layanan, fitur, pricing, dan kebutuhan kamu dengan gaya santai."
+            "Saya Xiao-An, asisten AI untuk Aryakun. "
+            "Saya membantu klien memahami layanan, fitur, pricing, tools, artikel, dan langkah penggunaan di website."
         )
     else:
         answer = (
-            "Aiya gege, Xiao-An is AryaKun's AI assistant lah. "
-            "I help clients with questions about services, features, pricing, and the right next step."
+            "I am Xiao-An, Aryakun's AI assistant. "
+            "I help clients with services, features, pricing, tools, articles, and practical next steps on the website."
         )
 
     return {
@@ -245,6 +260,26 @@ def identity_response(language: str) -> Dict[str, Any]:
         "recommended_type": "none",
         "recommended_url": "",
         "reason": "Identity query.",
+        "related_items": [],
+    }
+
+
+def owner_response(language: str) -> Dict[str, Any]:
+    if language == "id":
+        answer = (
+            "Aryakun adalah personal portfolio milik Arya, bukan toko atau perusahaan besar. "
+            "Website ini memperkenalkan profil owner, layanan, tools, dan konten yang dikelola Arya bersama tim saat dibutuhkan."
+        )
+    else:
+        answer = (
+            "Aryakun is Arya's personal portfolio website, not a generic store. "
+            "It introduces the owner profile, services, tools, and content managed by Arya with team support when needed."
+        )
+    return {
+        "answer": answer,
+        "recommended_type": "page",
+        "recommended_url": "/about",
+        "reason": "Owner/about query.",
         "related_items": [],
     }
 

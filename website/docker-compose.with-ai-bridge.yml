@@ -29,6 +29,7 @@ services:
       AI_API_TIMEOUT: ${AI_API_TIMEOUT:-90}
       AI_INTERNAL_SEARCH_KEY: ${AI_INTERNAL_SEARCH_KEY:-change-this-long-random-key}
       AI_INTERNAL_INDEX_KEY: ${AI_INTERNAL_INDEX_KEY:-change-this-long-random-key}
+      AI_OPENCLAW_CONTEXT_KEY: ${AI_OPENCLAW_CONTEXT_KEY:-change-this-long-random-key}
       AI_INDEX_ENDPOINT: ${AI_INDEX_ENDPOINT:-/admin/index/changed}
     volumes:
       - laravel_storage:/var/www/storage
