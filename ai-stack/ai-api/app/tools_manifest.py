@@ -21,6 +21,12 @@ def _normalize_manifest_item(item: Dict[str, Any]) -> Dict[str, Any]:
     source = dict(item) if isinstance(item, dict) else {}
     playbook = source.get("playbook", {})
     playbook = playbook if isinstance(playbook, dict) else {}
+    playbook_i18n = source.get("playbook_i18n", {})
+    playbook_i18n = playbook_i18n if isinstance(playbook_i18n, dict) else {}
+    playbook_i18n_id = playbook_i18n.get("id", {})
+    playbook_i18n_en = playbook_i18n.get("en", {})
+    playbook_i18n_id = playbook_i18n_id if isinstance(playbook_i18n_id, dict) else {}
+    playbook_i18n_en = playbook_i18n_en if isinstance(playbook_i18n_en, dict) else {}
     hook = source.get("hook", {})
     hook = hook if isinstance(hook, dict) else {}
     input_schema = source.get("input_schema", {})
@@ -61,6 +67,18 @@ def _normalize_manifest_item(item: Dict[str, Any]) -> Dict[str, Any]:
             "what_it_does": str(playbook.get("what_it_does", "")).strip(),
             "input_tips": [str(v).strip() for v in (playbook.get("input_tips", []) or []) if str(v).strip()][:16],
             "troubleshooting": [str(v).strip() for v in (playbook.get("troubleshooting", []) or []) if str(v).strip()][:16],
+        },
+        "playbook_i18n": {
+            "id": {
+                "what_it_does": str(playbook_i18n_id.get("what_it_does", "")).strip(),
+                "input_tips": [str(v).strip() for v in (playbook_i18n_id.get("input_tips", []) or []) if str(v).strip()][:16],
+                "troubleshooting": [str(v).strip() for v in (playbook_i18n_id.get("troubleshooting", []) or []) if str(v).strip()][:16],
+            },
+            "en": {
+                "what_it_does": str(playbook_i18n_en.get("what_it_does", "")).strip(),
+                "input_tips": [str(v).strip() for v in (playbook_i18n_en.get("input_tips", []) or []) if str(v).strip()][:16],
+                "troubleshooting": [str(v).strip() for v in (playbook_i18n_en.get("troubleshooting", []) or []) if str(v).strip()][:16],
+            },
         },
         "hook": {
             "tips": [str(v).strip() for v in (hook.get("tips", []) or []) if str(v).strip()][:16],
@@ -107,6 +125,18 @@ def _manifest_to_search_text(item: Dict[str, Any]) -> str:
             parts.append(str(tip))
         for issue in (playbook.get("troubleshooting", []) if isinstance(playbook.get("troubleshooting", []), list) else [])[:12]:
             parts.append(str(issue))
+
+    playbook_i18n = item.get("playbook_i18n", {})
+    if isinstance(playbook_i18n, dict):
+        for locale in ("id", "en"):
+            localized = playbook_i18n.get(locale, {})
+            if not isinstance(localized, dict):
+                continue
+            parts.append(str(localized.get("what_it_does", "")))
+            for tip in (localized.get("input_tips", []) if isinstance(localized.get("input_tips", []), list) else [])[:12]:
+                parts.append(str(tip))
+            for issue in (localized.get("troubleshooting", []) if isinstance(localized.get("troubleshooting", []), list) else [])[:12]:
+                parts.append(str(issue))
 
     hook = item.get("hook", {})
     if isinstance(hook, dict):

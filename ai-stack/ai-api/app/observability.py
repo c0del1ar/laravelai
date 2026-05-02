@@ -15,6 +15,10 @@ class Observability:
         self._chat_intents: Counter = Counter()
         self._chat_variants: Counter = Counter()
         self._chat_flags: Counter = Counter()
+        self._chat_tool_slugs: Counter = Counter()
+        self._chat_source_counts: Counter = Counter()
+        self._chat_context_sizes: Counter = Counter()
+        self._chat_tool_manifest_counts: Counter = Counter()
         self._chat_latency_ms: Deque[float] = deque(maxlen=500)
         self._chat_confidence: Deque[float] = deque(maxlen=500)
         self._prefix_gate_actions: Counter = Counter()
@@ -43,6 +47,9 @@ class Observability:
         handoff: bool = False,
         cache_hit: bool = False,
         grounded: bool = True,
+        source_count: int = 0,
+        tool_slug: str = "",
+        tool_manifest_count: int = 0,
     ):
         async with self._lock:
             self._chat_counts[channel] += 1
@@ -60,6 +67,11 @@ class Observability:
                 self._chat_flags["cache_hit"] += 1
             if not grounded:
                 self._chat_flags["ungrounded"] += 1
+            if tool_slug:
+                self._chat_tool_slugs[tool_slug] += 1
+            self._chat_source_counts[str(max(0, int(source_count)))] += 1
+            self._chat_context_sizes[str(max(0, int(context_pages)))] += 1
+            self._chat_tool_manifest_counts[str(max(0, int(tool_manifest_count)))] += 1
             self._chat_latency_ms.append(max(0.0, float(latency_ms)))
             self._chat_confidence.append(max(0.0, min(1.0, float(confidence))))
             if not success or reason:
@@ -98,6 +110,10 @@ class Observability:
                     "intent_counts": dict(self._chat_intents),
                     "experiment_variants": dict(self._chat_variants),
                     "flags": dict(self._chat_flags),
+                    "tool_slug_counts": dict(self._chat_tool_slugs),
+                    "source_count_histogram": dict(self._chat_source_counts),
+                    "context_size_histogram": dict(self._chat_context_sizes),
+                    "tool_manifest_count_histogram": dict(self._chat_tool_manifest_counts),
                     "prefix_gate_actions": dict(self._prefix_gate_actions),
                     "latency_ms_avg": round(chat_avg, 2),
                     "confidence_avg": round(conf_avg, 3),

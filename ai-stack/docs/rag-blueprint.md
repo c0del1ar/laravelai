@@ -2,7 +2,8 @@
 
 Dokumen ini jadi acuan untuk AI core yang dipakai bersama oleh:
 - Laravel website chat (`/v1/chat`)
-- OpenClaw channel sosial (WA/Telegram/Discord via `/v1/chat/completions`)
+- OpenClaw channel sosial (WA/Telegram/Discord, mode resmi native codex + context endpoint Laravel)
+- OpenClaw compatibility mode via FastAPI OpenAI-compatible (`/v1/chat/completions`) bila diperlukan
 
 Tujuan utama:
 - Jawaban konsisten lintas channel

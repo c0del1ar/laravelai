@@ -1,0 +1,362 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+PROFILE="${PROFILE:-openclaw}"
+SERVICE="${SERVICE:-openclaw}"
+PLUGIN_ID="${PLUGIN_ID:-xiaoan-dm-gate}"
+WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS:-60}"
+WAIT_INTERVAL_SECONDS="${WAIT_INTERVAL_SECONDS:-2}"
+ENV_FILE="${ENV_FILE:-.env}"
+
+usage() {
+  cat <<'EOF'
+openclawd - unified OpenClaw operator
+
+Usage:
+  ./openclawd up [services...]
+  ./openclawd restart [services...]
+  ./openclawd down [docker-compose down args...]
+  ./openclawd setup [all|xiaoan|dm-gate]
+  ./openclawd set <option> [value...]
+  ./openclawd get <config.path>
+  ./openclawd status
+  ./openclawd logs [docker-compose logs args...]
+  ./openclawd openclaw <args...>
+  ./openclawd <openclaw-subcommand...>
+  ./openclawd compose <args...>
+  ./openclawd help
+
+Setup modes:
+  all       : run xiaoan profile setup + dm-gate setup
+  xiaoan    : run setup_openclaw_xiaoan.sh only
+  dm-gate   : run setup_openclaw_native_dm_gate.sh only
+
+Set options:
+  config <path> <value> [extra flags]
+  model <provider/model-id>
+  read-receipts <true|false>
+  reaction-level <off|normal|always>
+  dm-policy <pairing|allowlist|open|disabled>
+  allow-from <json-array>                  (uses --strict-json)
+  prefix </ia>
+  cooldown <seconds>
+  reminder-id <text>
+  reminder-en <text>
+  env <KEY> <VALUE>
+
+Examples:
+  ./openclawd up
+  ./openclawd setup all
+  ./openclawd set config channels.whatsapp.dmPolicy open
+  ./openclawd set allow-from '["*"]'
+  ./openclawd set prefix /ia
+  ./openclawd get channels.whatsapp
+EOF
+}
+
+compose() {
+  docker compose --profile "$PROFILE" "$@"
+}
+
+preflight() {
+  bash ./openclaw_preflight.sh
+}
+
+wait_for_service_running() {
+  local elapsed=0
+  while true; do
+    if compose ps --status running "$SERVICE" | grep -q "$SERVICE"; then
+      return 0
+    fi
+    if (( elapsed >= WAIT_TIMEOUT_SECONDS )); then
+      echo "ERROR: service '$SERVICE' is not running after ${WAIT_TIMEOUT_SECONDS}s." >&2
+      compose ps "$SERVICE" || true
+      return 1
+    fi
+    sleep "$WAIT_INTERVAL_SECONDS"
+    elapsed=$((elapsed + WAIT_INTERVAL_SECONDS))
+  done
+}
+
+run_openclaw() {
+  wait_for_service_running
+  compose exec -T "$SERVICE" openclaw "$@"
+}
+
+set_env_value() {
+  local key="$1"
+  local value="$2"
+  if [[ ! -f "$ENV_FILE" ]]; then
+    touch "$ENV_FILE"
+  fi
+
+  local tmp
+  tmp="$(mktemp)"
+  awk -v k="$key" -v v="$value" '
+    BEGIN { done=0 }
+    $0 ~ ("^" k "=") {
+      print k "=" v
+      done=1
+      next
+    }
+    { print }
+    END {
+      if (!done) {
+        print k "=" v
+      }
+    }
+  ' "$ENV_FILE" > "$tmp"
+  mv "$tmp" "$ENV_FILE"
+}
+
+cmd_up() {
+  preflight
+  compose up -d openclaw_init_permissions
+  if (($# == 0)); then
+    compose up -d "$SERVICE"
+  else
+    compose up -d "$@"
+  fi
+}
+
+cmd_restart() {
+  preflight
+  compose up -d openclaw_init_permissions
+  if (($# == 0)); then
+    compose restart "$SERVICE"
+  else
+    compose restart "$@"
+  fi
+}
+
+cmd_down() {
+  if (($# == 0)); then
+    compose down
+  else
+    compose down "$@"
+  fi
+}
+
+cmd_setup() {
+  local mode="${1:-all}"
+  shift || true
+  case "$mode" in
+    all)
+      cmd_up "$SERVICE"
+      bash ./setup_openclaw_xiaoan.sh "$@"
+      bash ./setup_openclaw_native_dm_gate.sh
+      ;;
+    xiaoan|profile)
+      cmd_up "$SERVICE"
+      bash ./setup_openclaw_xiaoan.sh "$@"
+      ;;
+    dm-gate|plugin)
+      cmd_up "$SERVICE"
+      bash ./setup_openclaw_native_dm_gate.sh
+      ;;
+    *)
+      echo "Unknown setup mode: $mode" >&2
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+cmd_set() {
+  local option="${1:-}"
+  shift || true
+
+  case "$option" in
+    ""|help|-h|--help)
+      usage
+      ;;
+    config|raw)
+      local path="${1:-}"
+      local value="${2:-}"
+      if [[ -z "$path" || -z "$value" ]]; then
+        echo "Usage: ./openclawd set config <path> <value> [extra flags]" >&2
+        exit 1
+      fi
+      shift 2
+      preflight
+      run_openclaw config set "$path" "$value" "$@"
+      ;;
+    model)
+      local model="${1:-}"
+      if [[ -z "$model" ]]; then
+        echo "Usage: ./openclawd set model <provider/model-id>" >&2
+        exit 1
+      fi
+      preflight
+      run_openclaw models set "$model"
+      ;;
+    read-receipts)
+      local value="${1:-}"
+      if [[ -z "$value" ]]; then
+        echo "Usage: ./openclawd set read-receipts <true|false>" >&2
+        exit 1
+      fi
+      preflight
+      run_openclaw config set channels.whatsapp.sendReadReceipts "$value"
+      run_openclaw config set channels.whatsapp.accounts.default.sendReadReceipts "$value"
+      ;;
+    reaction-level)
+      local value="${1:-}"
+      if [[ -z "$value" ]]; then
+        echo "Usage: ./openclawd set reaction-level <off|normal|always>" >&2
+        exit 1
+      fi
+      preflight
+      run_openclaw config set channels.whatsapp.reactionLevel "$value"
+      run_openclaw config set channels.whatsapp.accounts.default.reactionLevel "$value"
+      ;;
+    dm-policy)
+      local value="${1:-}"
+      if [[ -z "$value" ]]; then
+        echo "Usage: ./openclawd set dm-policy <pairing|allowlist|open|disabled>" >&2
+        exit 1
+      fi
+      preflight
+      run_openclaw config set channels.whatsapp.dmPolicy "$value"
+      run_openclaw config set channels.whatsapp.accounts.default.dmPolicy "$value"
+      ;;
+    allow-from)
+      local json="${1:-}"
+      if [[ -z "$json" ]]; then
+        echo "Usage: ./openclawd set allow-from <json-array>" >&2
+        exit 1
+      fi
+      preflight
+      run_openclaw config set channels.whatsapp.allowFrom "$json" --strict-json
+      run_openclaw config set channels.whatsapp.accounts.default.allowFrom "$json" --strict-json
+      ;;
+    prefix)
+      local value="${1:-}"
+      if [[ -z "$value" ]]; then
+        echo "Usage: ./openclawd set prefix </ia>" >&2
+        exit 1
+      fi
+      set_env_value "OPENCLAW_REQUIRED_PREFIX" "$value"
+      echo "Updated $ENV_FILE: OPENCLAW_REQUIRED_PREFIX=$value"
+      echo "Run: ./openclawd restart"
+      ;;
+    cooldown)
+      local value="${1:-}"
+      if [[ -z "$value" ]]; then
+        echo "Usage: ./openclawd set cooldown <seconds>" >&2
+        exit 1
+      fi
+      set_env_value "OPENCLAW_PREFIX_REMINDER_COOLDOWN_SECONDS" "$value"
+      echo "Updated $ENV_FILE: OPENCLAW_PREFIX_REMINDER_COOLDOWN_SECONDS=$value"
+      echo "Run: ./openclawd restart"
+      ;;
+    reminder-id)
+      local value="$*"
+      if [[ -z "$value" ]]; then
+        echo "Usage: ./openclawd set reminder-id <text>" >&2
+        exit 1
+      fi
+      set_env_value "OPENCLAW_PREFIX_REMINDER_TEXT" "$value"
+      echo "Updated $ENV_FILE: OPENCLAW_PREFIX_REMINDER_TEXT=<custom>"
+      echo "Run: ./openclawd restart"
+      ;;
+    reminder-en)
+      local value="$*"
+      if [[ -z "$value" ]]; then
+        echo "Usage: ./openclawd set reminder-en <text>" >&2
+        exit 1
+      fi
+      set_env_value "OPENCLAW_PREFIX_REMINDER_TEXT_EN" "$value"
+      echo "Updated $ENV_FILE: OPENCLAW_PREFIX_REMINDER_TEXT_EN=<custom>"
+      echo "Run: ./openclawd restart"
+      ;;
+    env)
+      local key="${1:-}"
+      shift || true
+      local value="$*"
+      if [[ -z "$key" || -z "$value" ]]; then
+        echo "Usage: ./openclawd set env <KEY> <VALUE>" >&2
+        exit 1
+      fi
+      set_env_value "$key" "$value"
+      echo "Updated $ENV_FILE: $key=$value"
+      echo "Run: ./openclawd restart"
+      ;;
+    *)
+      if [[ "$option" == *.* ]]; then
+        local path="$option"
+        local value="${1:-}"
+        if [[ -z "$value" ]]; then
+          echo "Usage: ./openclawd set <config.path> <value> [extra flags]" >&2
+          exit 1
+        fi
+        shift
+        preflight
+        run_openclaw config set "$path" "$value" "$@"
+      else
+        echo "Unknown set option: $option" >&2
+        usage
+        exit 1
+      fi
+      ;;
+  esac
+}
+
+cmd_get() {
+  local path="${1:-}"
+  shift || true
+  if [[ -z "$path" ]]; then
+    echo "Usage: ./openclawd get <config.path>" >&2
+    exit 1
+  fi
+  preflight
+  run_openclaw config get "$path" "$@"
+}
+
+cmd_status() {
+  preflight
+  compose ps
+  echo
+  run_openclaw channels status || true
+}
+
+cmd_logs() {
+  if (($# == 0)); then
+    compose logs -f "$SERVICE"
+  else
+    compose logs "$@"
+  fi
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  case "$cmd" in
+    up) cmd_up "$@" ;;
+    restart) cmd_restart "$@" ;;
+    down) cmd_down "$@" ;;
+    setup) cmd_setup "$@" ;;
+    set) cmd_set "$@" ;;
+    get) cmd_get "$@" ;;
+    status) cmd_status "$@" ;;
+    logs) cmd_logs "$@" ;;
+    openclaw)
+      preflight
+      run_openclaw "$@"
+      ;;
+    compose)
+      compose "$@"
+      ;;
+    help|-h|--help) usage ;;
+    *)
+      preflight
+      run_openclaw "$cmd" "$@"
+      ;;
+  esac
+}
+
+main "$@"

@@ -32,6 +32,7 @@ from .config import (
     STRICT_GROUNDING_ENABLED,
     STRICT_GROUNDING_MIN_CONFIDENCE,
     STRICT_GROUNDING_REQUIRE_SOURCE,
+    STRICT_WEBSITE_SCOPE_ENABLED,
 )
 from .experiments import choose_experiment_variant
 from .groq_client import get_llm_auth_setup_error
@@ -49,6 +50,7 @@ from .nlp import (
     is_smalltalk_intent,
     normalize_text,
     owner_response,
+    query_terms,
     should_handoff_to_human,
 )
 from .retrieval import (
@@ -95,6 +97,18 @@ def _smalltalk_answer(language: str) -> str:
     return (
         "I am Xiao-An. If you want, tell me what you need from the Aryakun website "
         "like pricing, tools, features, or contact, and I will guide you quickly."
+    )
+
+
+def _website_scope_only_answer(language: str) -> str:
+    if language == "id":
+        return (
+            "Saya hanya menjawab topik seputar website Aryakun.id. "
+            "Silakan tanyakan tentang halaman, tools, pricing, produk, artikel, atau kontak."
+        )
+    return (
+        "I only answer topics related to the Aryakun.id website. "
+        "Please ask about pages, tools, pricing, products, articles, or contact."
     )
 
 
@@ -204,6 +218,60 @@ def _infer_execution_target(message: str, tutorial_mode: bool) -> str:
     if tutorial_mode or any(marker in text for marker in _TOOL_HINTS):
         return "tool"
     return "general"
+
+
+def _has_website_scope_signal(
+    message: str,
+    context_pages: List[Dict[str, Any]],
+    search_items: List[Dict[str, Any]],
+    catalog_candidates: List[Dict[str, Any]],
+    tool_manifests: List[Dict[str, Any]],
+) -> bool:
+    if has_context_relevance(message, context_pages):
+        return True
+
+    if tool_manifests:
+        return True
+
+    terms = query_terms(message)
+    if not terms:
+        return False
+
+    def _hit_count(text: str) -> int:
+        normalized = normalize_text(text)
+        if not normalized:
+            return 0
+        return sum(1 for term in terms if term in normalized)
+
+    for item in search_items[:8]:
+        if not isinstance(item, dict):
+            continue
+        combined = " ".join(
+            [
+                str(item.get("title", "")),
+                str(item.get("summary", "")),
+                str(item.get("url", "")),
+            ]
+        )
+        if _hit_count(combined) >= 1:
+            return True
+
+    for item in catalog_candidates[:8]:
+        if not isinstance(item, dict):
+            continue
+        combined = " ".join(
+            [
+                str(item.get("title", "")),
+                str(item.get("summary", "")),
+                str(item.get("url", "")),
+                str(item.get("path", "")),
+                str(item.get("section", "")),
+            ]
+        )
+        if _hit_count(combined) >= 1:
+            return True
+
+    return False
 
 
 def _upsert_source_for_url(
@@ -416,11 +484,8 @@ def _manifest_to_context_entry(item: Dict[str, Any]) -> Dict[str, Any]:
     steps = item.get("steps", [])
     steps = [str(v).strip() for v in steps if str(v).strip()] if isinstance(steps, list) else []
     output = str(item.get("output_explained", "")).strip()
-    playbook = item.get("playbook", {})
-    playbook = playbook if isinstance(playbook, dict) else {}
-    pb_what = str(playbook.get("what_it_does", "")).strip()
-    pb_tips = [str(v).strip() for v in playbook.get("input_tips", []) if str(v).strip()] if isinstance(playbook.get("input_tips", []), list) else []
-    pb_troubleshoot = [str(v).strip() for v in playbook.get("troubleshooting", []) if str(v).strip()] if isinstance(playbook.get("troubleshooting", []), list) else []
+    pb_what, pb_tips, pb_troubleshoot = _localized_playbook(item, "en")
+    _, pb_tips_id, pb_troubleshoot_id = _localized_playbook(item, "id")
     hook = item.get("hook", {})
     hook = hook if isinstance(hook, dict) else {}
     hook_examples = hook.get("examples", [])
@@ -436,10 +501,14 @@ def _manifest_to_context_entry(item: Dict[str, Any]) -> Dict[str, Any]:
         content_parts.append("Usage steps:\n- " + "\n- ".join(steps[:8]))
     if pb_tips:
         content_parts.append("Input tips:\n- " + "\n- ".join(pb_tips[:8]))
+    if pb_tips_id and pb_tips_id != pb_tips:
+        content_parts.append("Input tips (ID):\n- " + "\n- ".join(pb_tips_id[:8]))
     if output:
         content_parts.append("Output explained: " + output)
     if pb_troubleshoot:
         content_parts.append("Troubleshooting:\n- " + "\n- ".join(pb_troubleshoot[:6]))
+    if pb_troubleshoot_id and pb_troubleshoot_id != pb_troubleshoot:
+        content_parts.append("Troubleshooting (ID):\n- " + "\n- ".join(pb_troubleshoot_id[:6]))
     if hook_tips:
         content_parts.append("Hook tips:\n- " + "\n- ".join(hook_tips[:6]))
     if hook_examples:
@@ -461,6 +530,28 @@ def _manifest_to_context_entry(item: Dict[str, Any]) -> Dict[str, Any]:
         "content": "\n\n".join(content_parts).strip(),
         "source": "tool-manifest",
     }
+
+
+def _localized_playbook(manifest: Dict[str, Any], language: str) -> tuple[str, List[str], List[str]]:
+    playbook = manifest.get("playbook", {})
+    playbook = playbook if isinstance(playbook, dict) else {}
+    playbook_i18n = manifest.get("playbook_i18n", {})
+    playbook_i18n = playbook_i18n if isinstance(playbook_i18n, dict) else {}
+    localized = playbook_i18n.get(language, {})
+    localized = localized if isinstance(localized, dict) else {}
+
+    what = str(localized.get("what_it_does", "")).strip() or str(playbook.get("what_it_does", "")).strip()
+    raw_tips = localized.get("input_tips", [])
+    raw_tips = raw_tips if isinstance(raw_tips, list) and raw_tips else playbook.get("input_tips", [])
+    raw_tips = raw_tips if isinstance(raw_tips, list) else []
+    tips = [str(v).strip() for v in raw_tips if str(v).strip()]
+
+    raw_troubleshooting = localized.get("troubleshooting", [])
+    raw_troubleshooting = raw_troubleshooting if isinstance(raw_troubleshooting, list) and raw_troubleshooting else playbook.get("troubleshooting", [])
+    raw_troubleshooting = raw_troubleshooting if isinstance(raw_troubleshooting, list) else []
+    troubleshooting = [str(v).strip() for v in raw_troubleshooting if str(v).strip()]
+
+    return what, tips, troubleshooting
 
 
 def _merge_context_with_priority(
@@ -491,11 +582,7 @@ def _format_tutorial_fallback(manifest: Dict[str, Any], language: str) -> str:
     steps = manifest.get("steps", [])
     steps = [str(v).strip() for v in steps if str(v).strip()] if isinstance(steps, list) else []
     output = str(manifest.get("output_explained", "")).strip()
-    playbook = manifest.get("playbook", {})
-    playbook = playbook if isinstance(playbook, dict) else {}
-    pb_what = str(playbook.get("what_it_does", "")).strip()
-    pb_tips = [str(v).strip() for v in playbook.get("input_tips", []) if str(v).strip()] if isinstance(playbook.get("input_tips", []), list) else []
-    pb_troubleshoot = [str(v).strip() for v in playbook.get("troubleshooting", []) if str(v).strip()] if isinstance(playbook.get("troubleshooting", []), list) else []
+    pb_what, pb_tips, pb_troubleshoot = _localized_playbook(manifest, language)
     hook = manifest.get("hook", {})
     hook = hook if isinstance(hook, dict) else {}
     hook_tips = [str(v).strip() for v in hook.get("tips", []) if str(v).strip()] if isinstance(hook.get("tips", []), list) else []
@@ -582,6 +669,25 @@ def _answer_has_tutorial_shape(answer: str, language: str) -> bool:
     return sum(1 for m in markers if m in text) >= 2
 
 
+def _looks_like_tool_refusal(answer: str) -> bool:
+    text = normalize_text(answer)
+    if not text:
+        return False
+    refusal_markers = [
+        "tidak bisa membantu",
+        "tidak dapat membantu",
+        "maaf saya tidak bisa",
+        "i cannot help",
+        "i cant help",
+        "i cannot assist",
+        "i cant assist",
+        "cannot provide",
+        "akses tidak sah",
+        "unauthorized access",
+    ]
+    return any(marker in text for marker in refusal_markers)
+
+
 def format_ai_result_text(result: Dict[str, Any], language: str, channel: str = "web") -> str:
     answer = str(result.get("answer", "")).strip()
     rec_url = str(result.get("recommended_url", "")).strip()
@@ -659,6 +765,9 @@ async def generate_chat_response(
         handoff: bool = False,
         cache_hit: bool = False,
         grounded: bool = True,
+        source_count: int = 0,
+        tool_slug: str = "",
+        tool_manifest_count: int = 0,
     ):
         await observability.record_chat(
             channel=channel,
@@ -673,17 +782,33 @@ async def generate_chat_response(
             handoff=handoff,
             cache_hit=cache_hit,
             grounded=grounded,
+            source_count=source_count,
+            tool_slug=tool_slug,
+            tool_manifest_count=tool_manifest_count,
         )
 
     auth_error = get_llm_auth_setup_error()
     if auth_error:
-        raise HTTPException(status_code=500, detail=auth_error)
+        logger.error("LLM auth setup error: %s", auth_error)
+        language = detect_language(message, history)
+        fallback = not_found_response(language)
+        fallback["reason"] = f"LLM auth setup error: {auth_error}"
+        fallback["intent_mode"] = "config_error"
+        fallback["confidence_score"] = 0.0
+        fallback["recommended_type"] = "none"
+        fallback["recommended_url"] = ""
+        fallback["related_items"] = []
+        fallback["sources"] = []
+        fallback = apply_channel_guardrails(fallback, channel)
+        await _record(False, 0.0, 0, str(fallback.get("reason", "")), intent="config_error")
+        return fallback
 
     merged_history = await memory_store.merge_with_request_history(user_id or "", channel, history)
     language = detect_language(message, merged_history)
     intent_profile = classify_intent_profile(message)
     intent_mode = str(intent_profile.get("intent_mode", "navigation"))
     tutorial_mode = bool(intent_profile.get("tutorial_mode", False))
+    tool_slug_hint = str(intent_profile.get("tool_slug_hint", "")).strip()
     execution_requested = bool(intent_profile.get("execution_request", False)) or _looks_like_execution_request(message)
     experiment_variant, experiment_model = choose_experiment_variant(user_id or "", channel)
 
@@ -757,7 +882,6 @@ async def generate_chat_response(
         if execution_target == "tool":
             manifests: List[Dict[str, Any]] = []
             try:
-                tool_slug_hint = str(intent_profile.get("tool_slug_hint", "")).strip()
                 if tool_slug_hint:
                     hinted = await fetch_tool_manifest_by_slug(tool_slug_hint)
                     if hinted:
@@ -801,6 +925,8 @@ async def generate_chat_response(
             str(block_result.get("reason", "")),
             intent="cs_blocked_execution",
             variant=experiment_variant,
+            source_count=len(block_result.get("sources", []) if isinstance(block_result.get("sources", []), list) else []),
+            tool_slug=tool_slug_hint,
         )
         return block_result
 
@@ -825,7 +951,6 @@ async def generate_chat_response(
     tool_context: List[Dict[str, Any]] = []
     if tutorial_mode:
         try:
-            tool_slug_hint = str(intent_profile.get("tool_slug_hint", "")).strip()
             if tool_slug_hint:
                 hinted = await fetch_tool_manifest_by_slug(tool_slug_hint)
                 if hinted:
@@ -842,6 +967,20 @@ async def generate_chat_response(
         except Exception:
             tool_manifests = []
             tool_context = []
+    elif tool_slug_hint:
+        try:
+            hinted = await fetch_tool_manifest_by_slug(tool_slug_hint)
+            if hinted:
+                hinted = apply_tool_hook(hinted)
+                tool_manifests = [hinted]
+                tool_context = [_manifest_to_context_entry(hinted)]
+        except Exception:
+            tool_manifests = []
+            tool_context = []
+
+    observed_tool_slug = tool_slug_hint
+    if not observed_tool_slug and tool_manifests:
+        observed_tool_slug = str(tool_manifests[0].get("slug", "")).strip()
 
     search_queries = expand_queries_for_intent(message, merged_history, intent_profile)
 
@@ -879,6 +1018,39 @@ async def generate_chat_response(
             }
         )
 
+    if STRICT_WEBSITE_SCOPE_ENABLED and not _has_website_scope_signal(
+        message,
+        context_pages,
+        search_items,
+        catalog_candidates,
+        tool_manifests,
+    ):
+        result = {
+            "answer": _website_scope_only_answer(language),
+            "recommended_type": "none",
+            "recommended_url": "",
+            "reason": "strict-website-scope guardrail",
+            "related_items": [],
+            "sources": [],
+            "confidence_score": 0.0,
+            "intent_mode": "offscope",
+            "experiment_variant": experiment_variant,
+            "experiment_model": experiment_model,
+        }
+        result = apply_channel_guardrails(result, channel)
+        await memory_store.add_turn(user_id or "", channel, message, str(result.get("answer", "")))
+        await _record(
+            False,
+            0.0,
+            len(context_pages),
+            str(result.get("reason", "")),
+            intent="offscope",
+            variant=experiment_variant,
+            tool_slug=observed_tool_slug,
+            tool_manifest_count=len(tool_manifests),
+        )
+        return result
+
     cache_key = build_response_cache_key(
         message=message,
         channel=channel,
@@ -903,6 +1075,9 @@ async def generate_chat_response(
             intent=intent_mode,
             variant=experiment_variant,
             cache_hit=True,
+            source_count=len(cached_payload.get("sources", []) if isinstance(cached_payload.get("sources", []), list) else []),
+            tool_slug=observed_tool_slug,
+            tool_manifest_count=len(tool_manifests),
         )
         return cached_payload
 
@@ -958,6 +1133,18 @@ async def generate_chat_response(
             _upsert_source_for_url(result, str(result.get("recommended_url", "")).strip(), context_pages, site_catalog, tool_manifests)
 
         answer_norm = normalize_text(str(result.get("answer", "")))
+        if tool_manifests and _looks_like_tool_refusal(answer_norm):
+            primary = tool_manifests[0]
+            primary_url = str(primary.get("url", "")).strip()
+            result["answer"] = _format_tutorial_fallback(primary, language)
+            if primary_url:
+                result["recommended_url"] = primary_url
+                result["recommended_type"] = "tool"
+            result["reason"] = (str(result.get("reason", "")).strip() + " Tool-refusal answer overridden by manifest tutorial.").strip()
+            result["confidence_score"] = max(float(result.get("confidence_score", 0.0)), 0.62)
+            _upsert_source_for_url(result, str(result.get("recommended_url", "")).strip(), context_pages, site_catalog, tool_manifests)
+            answer_norm = normalize_text(str(result.get("answer", "")))
+
         if CS_ONLY_MODE and (execution_requested or any(hint in answer_norm for hint in _EXECUTION_CLAIM_HINTS)):
             execution_target = str(intent_profile.get("execution_target", "none")).strip() or "none"
             if execution_target == "none":
@@ -1042,6 +1229,9 @@ async def generate_chat_response(
                         low_confidence=True,
                         handoff=True,
                         grounded=grounded,
+                        source_count=len(result.get("sources", []) if isinstance(result.get("sources", []), list) else []),
+                        tool_slug=observed_tool_slug,
+                        tool_manifest_count=len(tool_manifests),
                     )
                     return result
         else:
@@ -1065,6 +1255,9 @@ async def generate_chat_response(
             variant=experiment_variant,
             low_confidence=low_conf,
             grounded=grounded,
+            source_count=len(result.get("sources", []) if isinstance(result.get("sources", []), list) else []),
+            tool_slug=observed_tool_slug,
+            tool_manifest_count=len(tool_manifests),
         )
         return result
     except httpx.HTTPStatusError as e:
@@ -1108,6 +1301,9 @@ async def generate_chat_response(
             intent=intent_mode,
             variant=experiment_variant,
             grounded=False,
+            source_count=len(fallback.get("sources", []) if isinstance(fallback.get("sources", []), list) else []),
+            tool_slug=observed_tool_slug,
+            tool_manifest_count=len(tool_manifests),
         )
         return fallback
     except Exception as e:
@@ -1150,6 +1346,9 @@ async def generate_chat_response(
             intent=intent_mode,
             variant=experiment_variant,
             grounded=False,
+            source_count=len(fallback.get("sources", []) if isinstance(fallback.get("sources", []), list) else []),
+            tool_slug=observed_tool_slug,
+            tool_manifest_count=len(tool_manifests),
         )
         return fallback
 

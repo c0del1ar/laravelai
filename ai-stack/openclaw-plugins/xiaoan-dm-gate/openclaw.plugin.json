@@ -1,0 +1,9 @@
+{
+  "id": "xiaoan-dm-gate",
+  "name": "Xiao-An DM Gate",
+  "description": "Native DM prefix gate + cooldown reminder for OpenClaw.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

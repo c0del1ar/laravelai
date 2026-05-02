@@ -35,6 +35,8 @@ website/storage/framework/views/
 website/bootstrap/cache/*.php
 
 # Project runtime artifacts
+.codex
+*.zip
 website/db_backups/
 ai-stack/evals/eval_report.json
 ai-stack/training/data/

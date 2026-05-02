@@ -74,6 +74,7 @@ class AiToolManifestService
 
         $steps = $this->buildSteps($tool, $fieldSpecs, $settings);
         $playbook = $this->buildPlaybook($tool, $fieldSpecs, $settings, $steps);
+        $playbookI18n = $this->buildPlaybookI18n($tool, $playbook, $settings);
 
         $outputExplained = (string) data_get($settings, 'ai_manifest.output_explained', '');
         if ($outputExplained === '') {
@@ -122,6 +123,7 @@ class AiToolManifestService
             ],
             'steps' => $steps,
             'playbook' => $playbook,
+            'playbook_i18n' => $playbookI18n,
             'output_explained' => $outputExplained,
             'faq' => $faq,
             'error_cases' => $errorCases,
@@ -223,5 +225,58 @@ class AiToolManifestService
         }
 
         return $tips;
+    }
+
+    private function buildPlaybookI18n(Tool $tool, array $playbook, array $settings): array
+    {
+        $fromSettings = data_get($settings, 'ai_playbook_i18n', []);
+        $fromSettings = is_array($fromSettings) ? $fromSettings : [];
+
+        $id = is_array($fromSettings['id'] ?? null) ? $fromSettings['id'] : [];
+        $en = is_array($fromSettings['en'] ?? null) ? $fromSettings['en'] : [];
+
+        $whatId = trim((string) ($id['what_it_does'] ?? ''));
+        if ($whatId === '') {
+            $whatId = trim((string) ($playbook['what_it_does'] ?? ''));
+        }
+
+        $whatEn = trim((string) ($en['what_it_does'] ?? ''));
+        if ($whatEn === '') {
+            $whatEn = trim((string) ($playbook['what_it_does'] ?? ''));
+            if ($whatEn === '') {
+                $whatEn = trim((string) ($tool->description ?? ''));
+            }
+        }
+
+        $inputTipsId = $this->stringListOrFallback($id['input_tips'] ?? null, $playbook['input_tips'] ?? []);
+        $inputTipsEn = $this->stringListOrFallback($en['input_tips'] ?? null, $playbook['input_tips'] ?? []);
+
+        $troubleshootId = $this->stringListOrFallback($id['troubleshooting'] ?? null, $playbook['troubleshooting'] ?? []);
+        $troubleshootEn = $this->stringListOrFallback($en['troubleshooting'] ?? null, $playbook['troubleshooting'] ?? []);
+
+        return [
+            'id' => [
+                'what_it_does' => $whatId,
+                'input_tips' => $inputTipsId,
+                'troubleshooting' => $troubleshootId,
+            ],
+            'en' => [
+                'what_it_does' => $whatEn,
+                'input_tips' => $inputTipsEn,
+                'troubleshooting' => $troubleshootEn,
+            ],
+        ];
+    }
+
+    private function stringListOrFallback(mixed $primary, mixed $fallback): array
+    {
+        $candidate = is_array($primary) ? $primary : [];
+        $candidate = array_values(array_filter(array_map(fn ($v) => trim((string) $v), $candidate), fn ($v) => $v !== ''));
+        if ($candidate !== []) {
+            return $candidate;
+        }
+
+        $backup = is_array($fallback) ? $fallback : [];
+        return array_values(array_filter(array_map(fn ($v) => trim((string) $v), $backup), fn ($v) => $v !== ''));
     }
 }

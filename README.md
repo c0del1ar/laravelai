@@ -4,7 +4,8 @@ Pola yang dipakai:
 
 - Browser -> Laravel `/api/ai/chat`
 - Laravel -> FastAPI internal (`http://ai_fastapi:8008`)
-- OpenClaw (WA/Telegram/Discord) -> FastAPI OpenAI-compatible (`http://ai_fastapi:8008/v1/chat/completions`)
+- OpenClaw (WA/Telegram/Discord) -> OpenClaw native codex (mode resmi) dengan website context endpoint Laravel
+- OpenClaw (opsional compatibility) -> FastAPI OpenAI-compatible (`http://ai_fastapi:8008/v1/chat/completions`)
 - FastAPI -> Laravel internal search (`http://laravel_franken:8000/api/internal/ai/search`)
 - FastAPI -> Laravel internal tools manifest (`http://laravel_franken:8000/api/internal/ai/tools`)
 - FastAPI -> Laravel internal structured catalog (`http://laravel_franken:8000/api/internal/ai/catalog`)
@@ -36,21 +37,36 @@ Blueprint arsitektur lengkap ada di [ai-stack/docs/rag-blueprint.md](/home/an/Pr
    - pastikan `CATALOG_API_URL=http://laravel_franken:8000/api/internal/ai/catalog`
    - isi `SITE_NAVIGATION_BRIEF` untuk menegaskan fokus konten website (pricing, fitur, tentang Aryakun, kontak, dll)
    - atur parameter crawl/index (`CRAWL_*`, `RAG_*`, `SITE_CATALOG_MAX_ITEMS`) sesuai ukuran situs
-   - set `OPENCLAW_WEBHOOK_KEY` (opsional, hanya untuk endpoint `/v1/openclaw`)
-   - set `OPENCLAW_COMPAT_API_KEY` (wajib jika OpenClaw pakai provider ke FastAPI)
+   - set `OPENCLAW_WEBHOOK_KEY` (wajib jika profile `openclaw` dijalankan)
+   - set `OPENCLAW_COMPAT_API_KEY` hanya jika pakai mode compatibility (`/v1/chat/completions`)
    - set `OPENCLAW_COMPAT_MODEL_ID` (default: `xiao-an`)
+   - set `OPENCLAW_OWNER_NOTIFY_URL` ke endpoint Laravel internal notify (default: `/api/internal/ai/openclaw/owner-notify`)
+   - set `OPENCLAW_OWNER_NOTIFY_KEY` (atau fallback ke `SEARCH_API_KEY`) untuk auth header ke endpoint notify
    - jika mau jalankan OpenClaw container di stack ini, set `OPENCLAW_IMAGE` sesuai image OpenClaw yang kamu pakai
    - `docker compose up -d --build`
 
 4. Jalankan website compose.
-5. (Opsional) Jalankan OpenClaw terpisah: `docker compose --profile openclaw up -d`
+5. (Opsional) Jalankan OpenClaw profile lewat preflight wrapper:
+   ```bash
+   cd ai-stack
+   bash ./openclaw_profile_up.sh
+   ```
+6. (Opsional) Aktifkan native DM gate plugin (cooldown + reminder + owner notify):
+   ```bash
+   cd ai-stack
+   bash ./setup_openclaw_native_dm_gate.sh
+   ```
 
 ## Catatan
 
 - FastAPI **tidak dipublish** ke host. Ia hanya `expose: 8008` di Docker network.
 - FastAPI sekarang memakai volume `ai_fastapi_data` untuk cache knowledge base (`KB_CACHE_PATH`) agar indeks crawl tidak hilang saat container restart.
+- OpenClaw sekarang memakai volume `openclaw_data` (`/home/node/.openclaw`) agar sesi channel/linking tidak hilang saat container recreate.
+- Jika muncul error `EACCES ... /home/node/.openclaw/openclaw.json.*.tmp`, jalankan:
+  - `docker compose --profile openclaw up -d openclaw_init_permissions`
+  - `docker compose --profile openclaw restart openclaw`
 - FastAPI sekarang juga bisa menarik catalog terstruktur dari Laravel (`/internal/ai/catalog`) sebagai sinyal navigasi non-HTML (section/title/keywords/updated_at).
-- LLM dipanggil dari FastAPI ke provider OpenAI-compatible. Default sekarang `LLM_PROVIDER=openai` dengan model `OPENAI_MODEL=gpt-5.1`.
+- LLM dipanggil dari FastAPI ke provider OpenAI-compatible. Default sekarang `LLM_PROVIDER=groq` dengan model `GROQ_MODEL=llama-3.1-8b-instant`.
 - Untuk OpenAI, set `OPENAI_AUTH_MODE=api_key` + `OPENAI_API_KEY`. Opsi `OPENAI_AUTH_MODE=oauth` memakai bearer token di `OPENAI_OAUTH_ACCESS_TOKEN`.
 - Browser user hanya bicara ke route Laravel, jadi tidak perlu CORS untuk AI stack.
 - `config/ai_catalog.php` perlu kamu sesuaikan dengan model Laravel yang benar.
@@ -59,6 +75,7 @@ Blueprint arsitektur lengkap ada di [ai-stack/docs/rag-blueprint.md](/home/an/Pr
 - AI core sekarang memakai hybrid retrieval (lexical + semantic-hash) + reranker, lalu fallback chunk/page.
 - AI core sekarang menggabungkan sumber crawl HTML + structured catalog Laravel + tool manifest, lalu intent-aware reranking.
 - AI sekarang bisa dijalankan dalam mode customer-service only (`CS_ONLY_MODE=true`): tidak mengeksekusi aksi/tool, hanya panduan how-to dan info layanan.
+- Scope website ketat tersedia (`STRICT_WEBSITE_SCOPE_ENABLED=true`): pertanyaan di luar konteks aryakun.id akan ditolak dan diarahkan kembali ke topik website.
 - Retrieval sekarang pakai reranker kandidat lebih lebar (`RAG_RERANK_CANDIDATES`) + intent boost (pricing/contact/tutorial) supaya hasil konteks lebih presisi.
 - Semantic retrieval sekarang bisa pakai embedding beneran (`EMBEDDING_PROVIDER=openai`) dengan vector store SQLite (`VECTOR_DB_PATH`), fallback ke local-hash jika auth OpenAI tidak tersedia.
 - Untuk pertanyaan "how to use / cara pakai tool", AI memprioritaskan tools manifest + playbook (what-it-does, input tips, troubleshooting) dari endpoint internal Laravel.
@@ -91,57 +108,58 @@ fetch('/api/ai/chat', {
 
 Response `answer` dari `/api/ai/chat` sudah berisi format navigasi (jawaban + link), dan `answer_raw` tetap disertakan untuk teks mentah.
 
-## OpenClaw ke AI core FastAPI (tanpa Laravel)
+## OpenClaw native OpenAI Codex (`openai-codex/gpt-5.4`) — mode resmi
 
-FastAPI menyediakan endpoint OpenAI-compatible untuk model provider OpenClaw:
+Mode resmi untuk OpenClaw di repo ini adalah native codex + context endpoint Laravel.
 
-```http
-GET  /v1/models
-POST /v1/chat/completions
-Authorization: Bearer <OPENCLAW_COMPAT_API_KEY>
-Content-Type: application/json
-```
-
-Konfigurasikan OpenClaw agar model default diarahkan ke FastAPI:
+1. Pastikan key webhook sudah diisi (wajib saat profile OpenClaw aktif):
 
 ```bash
-docker compose --profile openclaw exec -it openclaw openclaw config set models.providers.fastapi.baseUrl http://ai_fastapi:8008/v1
-docker compose --profile openclaw exec -it openclaw openclaw config set models.providers.fastapi.api openai-completions
-docker compose --profile openclaw exec -it openclaw openclaw config set models.providers.fastapi.apiKey '$OPENCLAW_COMPAT_API_KEY'
-docker compose --profile openclaw exec -it openclaw openclaw config set models.providers.fastapi.models '[{"id":"xiao-an","name":"AI Core Xiao-An","reasoning":false,"input":["text"],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":128000,"maxTokens":4096}]'
-docker compose --profile openclaw exec -it openclaw openclaw models set fastapi/xiao-an
+cd ai-stack
+bash ./openclaw_preflight.sh
 ```
 
-Setelah ini, balasan DM channel (WA/Telegram/Discord) akan lewat AI core FastAPI, bukan model Anthropic default OpenClaw.
-
-## OpenClaw native OpenAI Codex (`openai-codex/gpt-5.4`)
-
-Jika kamu ingin OpenClaw memakai provider native (tanpa forward model ke FastAPI) dan tetap menjadi CS website, gunakan model `openai-codex/gpt-5.4` + endpoint context dari Laravel.
-
-1. Login OAuth Codex:
+2. Login OAuth Codex:
 
 ```bash
 openclaw models auth login --provider openai-codex
 ```
 
-2. Set model default:
+3. Set model default:
 
 ```bash
 openclaw config set agents.defaults.model.primary openai-codex/gpt-5.4
 ```
 
-3. Batasi tool agar mode CS tidak mengeksekusi hal berisiko:
+4. Batasi tool agar mode CS tidak mengeksekusi hal berisiko:
 
-```json5
+```bash
+# dari folder ai-stack
+bash ./lock_openclaw_cs_mode.sh
+```
+
+Script di atas akan menulis allow-list + deny-list tool ke konfigurasi OpenClaw (dengan fallback key path antar versi), lalu restart service.
+
+Nilai default policy:
+
+```json
 {
-  tools: {
-    allow: ["session_status", "group:web", "group:memory"],
-    deny: ["exec", "browser", "canvas", "read", "write", "edit", "apply_patch"]
-  }
+  "allow": ["session_status", "group:web", "group:memory"],
+  "deny": ["exec", "terminal", "shell", "run", "read", "write", "edit", "apply_patch", "browser", "canvas"]
 }
 ```
 
-4. Tambahkan system prompt override (atau prompt per channel) agar bot selalu grounding ke website:
+5. Jalankan/restart profile OpenClaw dengan wrapper (enforce webhook key):
+
+```bash
+# start
+bash ./openclaw_profile_up.sh
+
+# restart
+bash ./openclaw_profile_restart.sh
+```
+
+6. Tambahkan system prompt override (atau prompt per channel) agar bot selalu grounding ke website:
 
 ```text
 Anda adalah Xiao-An, asisten AI cewek manja untuk customer service website Aryakun.
@@ -149,7 +167,8 @@ Saat user tanya "siapa kamu", wajib jawab tegas bahwa kamu Xiao-An dan pekerjaan
 Gunakan slang Chinese-Indonesian ringan (aiya, gege, lah) secukupnya, tetap sopan dan ringkas.
 Jangan pernah bilang "unfinished", "not configured", atau "belum punya identitas".
 Sebelum menjawab pertanyaan website, ambil context dari:
-https://<domain-kamu>/api/ai/openclaw/context?key=<AI_OPENCLAW_CONTEXT_KEY>&q=<urlencode-pertanyaan>
+GET https://<domain-kamu>/api/ai/openclaw/context?q=<urlencode-pertanyaan>&limit=8
+Header: X-OpenClaw-Context-Key: <AI_OPENCLAW_CONTEXT_KEY>
 Gunakan `assistant_profile` dan `response_policy` sebagai aturan identitas/persona.
 Gunakan data `search`, `catalog`, dan `tools` sebagai sumber utama konten website.
 Jika data tidak cukup, minta klarifikasi dan jangan mengarang.
@@ -159,7 +178,22 @@ Jangan pernah mengklaim mengeksekusi aksi akun/transaksi.
 Endpoint context Laravel (GET):
 
 ```http
-/api/ai/openclaw/context?key=<AI_OPENCLAW_CONTEXT_KEY>&q=<query>&limit=8
+GET /api/ai/openclaw/context?q=<query>&limit=8
+X-OpenClaw-Context-Key: <AI_OPENCLAW_CONTEXT_KEY>
+```
+
+Untuk deployment Docker internal, lebih stabil pakai base URL internal network:
+
+```http
+http://laravel_franken:8000/api/ai/openclaw/context
+```
+
+Hindari hostname container instance seperti `aryakunid-laravel_franken-1` karena bisa berubah saat recreate.
+
+Fallback kompatibilitas (jika channel/web_fetch tidak bisa kirim custom header):
+
+```http
+GET /api/ai/openclaw/context?key=<AI_OPENCLAW_CONTEXT_KEY>&q=<query>&limit=8
 ```
 
 Contoh response:
@@ -174,6 +208,41 @@ Contoh response:
     "tools": []
   }
 }
+```
+
+### Native DM gate + owner notify
+
+- OpenClaw native sekarang bisa dipasang plugin `xiaoan-dm-gate` untuk:
+  - hanya merespons DM non-prefix dengan reminder sesuai cooldown
+  - membisukan DM non-prefix selama masih dalam cooldown
+  - tetap melewatkan DM prefix `/ia` ke AI normal
+  - mengirim notif email owner saat reminder pertama per sender di luar cooldown
+- Laravel internal notify endpoint:
+  - `POST /api/internal/ai/openclaw/owner-notify`
+  - auth: header `X-Search-Key` (pakai `AI_INTERNAL_SEARCH_KEY`)
+  - recipient email: `AI_OWNER_NOTIFY_EMAIL`
+
+## OpenClaw compatibility ke AI core FastAPI (opsional)
+
+Gunakan mode ini hanya jika kamu memang ingin OpenClaw diarahkan ke FastAPI OpenAI-compatible bridge.
+
+FastAPI menyediakan endpoint:
+
+```http
+GET  /v1/models
+POST /v1/chat/completions
+Authorization: Bearer <OPENCLAW_COMPAT_API_KEY>
+Content-Type: application/json
+```
+
+Konfigurasi provider `fastapi` di OpenClaw:
+
+```bash
+docker compose --profile openclaw exec -it openclaw openclaw config set models.providers.fastapi.baseUrl http://ai_fastapi:8008/v1
+docker compose --profile openclaw exec -it openclaw openclaw config set models.providers.fastapi.api openai-completions
+docker compose --profile openclaw exec -it openclaw openclaw config set models.providers.fastapi.apiKey '$OPENCLAW_COMPAT_API_KEY'
+docker compose --profile openclaw exec -it openclaw openclaw config set models.providers.fastapi.models '[{"id":"xiao-an","name":"AI Core Xiao-An","reasoning":false,"input":["text"],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":128000,"maxTokens":4096}]'
+docker compose --profile openclaw exec -it openclaw openclaw models set fastapi/xiao-an
 ```
 
 ## Prompt tuning website
@@ -234,12 +303,12 @@ LLM_MAX_TOOL_FIELDS=8
 LLM_MAX_TOOL_STEPS=6
 ```
 
-Set provider + model utama:
+Set provider + model utama (default Groq):
 
 ```env
-LLM_PROVIDER=openai
-OPENAI_MODEL=gpt-5.1
-OPENAI_FALLBACK_MODELS=gpt-5.1,gpt-5-mini,gpt-5-nano
+LLM_PROVIDER=groq
+GROQ_MODEL=llama-3.1-8b-instant
+GROQ_FALLBACK_MODELS=llama-3.1-8b-instant,llama-3.1-70b-versatile,meta-llama/llama-4-scout-17b-16e-instruct
 LLM_RETRY_MAX_ATTEMPTS=3
 LLM_RETRY_BASE_DELAY_MS=350
 ```
@@ -476,6 +545,7 @@ LLM_RETRY_MAX_ATTEMPTS=3
 LLM_RETRY_BASE_DELAY_MS=350
 LOW_CONFIDENCE_THRESHOLD=0.42
 CS_ONLY_MODE=true
+STRICT_WEBSITE_SCOPE_ENABLED=true
 ```
 
 ## Eval otomatis (quality gate)
@@ -557,6 +627,8 @@ Endpoint berikut tetap tersedia untuk integrasi webhook custom:
 POST /v1/openclaw
 X-OpenClaw-Key: <OPENCLAW_WEBHOOK_KEY>
 ```
+
+Saat profile `openclaw` dijalankan, `OPENCLAW_WEBHOOK_KEY` wajib diisi (wrapper preflight akan menolak start/restart jika kosong atau placeholder).
 
 Payload minimum:
 

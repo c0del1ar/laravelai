@@ -354,6 +354,7 @@ async def openclaw_chat(request: Request, payload: Dict[str, Any]):
     if not message:
         raise HTTPException(status_code=422, detail="Invalid payload: message is required")
     sender_id = resolve_sender_id(payload, message, str(data["user_id"] or ""))
+    effective_user_id = sender_id or (str(data["user_id"] or "").strip() or None)
     gate = await evaluate_openclaw_prefix_gate(message, sender_id)
     gate_action = str(gate.get("action", "proceed")).strip()
     await observability.record_prefix_gate(gate_action)
@@ -396,7 +397,7 @@ async def openclaw_chat(request: Request, payload: Dict[str, Any]):
     ai_result = await generate_chat_response(
         message,
         data["history"],
-        user_id=str(data["user_id"] or "").strip() or None,
+        user_id=effective_user_id,
         channel="openclaw",
     )
     language = detect_language(message, data["history"])
