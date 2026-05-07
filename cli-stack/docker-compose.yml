@@ -1,0 +1,29 @@
+services:
+  cli_tool_runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cli_tool_runner
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      CLI_TOOL_RUNNER_ADDR: ${CLI_TOOL_RUNNER_ADDR:-:37000}
+      CLI_TOOL_RUNNER_BASE_DIR: ${CLI_TOOL_RUNNER_BASE_DIR:-/app}
+      CLI_TOOL_RUNNER_CONFIG: ${CLI_TOOL_RUNNER_CONFIG:-/app/config/tools.json}
+      CLI_TOOL_RUNNER_KEY: ${CLI_TOOL_RUNNER_KEY:-}
+    volumes:
+      - ./config/tools.json:/app/config/tools.json:ro
+      - ./tools:/app/tools:ro
+      - ./data:/app/data
+    expose:
+      - "37000"
+    ports:
+      - "${CLI_TOOL_RUNNER_HOST_PORT:-37000}:37000"
+    networks:
+      - ai_edge
+
+networks:
+  ai_edge:
+    external: true
+    name: ${AI_SHARED_NETWORK:-ai_bridge_local}

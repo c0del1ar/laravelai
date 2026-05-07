@@ -49,12 +49,12 @@ Blueprint arsitektur lengkap ada di [ai-stack/docs/rag-blueprint.md](/home/an/Pr
 5. (Opsional) Jalankan OpenClaw profile lewat preflight wrapper:
    ```bash
    cd ai-stack
-   bash ./openclaw_profile_up.sh
+   ./openclawd up
    ```
 6. (Opsional) Aktifkan native DM gate plugin (cooldown + reminder + owner notify):
    ```bash
    cd ai-stack
-   bash ./setup_openclaw_native_dm_gate.sh
+   ./openclawd setup dm-gate
    ```
 
 ## Catatan
@@ -116,7 +116,7 @@ Mode resmi untuk OpenClaw di repo ini adalah native codex + context endpoint Lar
 
 ```bash
 cd ai-stack
-bash ./openclaw_preflight.sh
+./openclawdscr/openclaw_preflight.sh
 ```
 
 2. Login OAuth Codex:
@@ -134,11 +134,17 @@ openclaw config set agents.defaults.model.primary openai-codex/gpt-5.4
 4. Batasi tool agar mode CS tidak mengeksekusi hal berisiko:
 
 ```bash
-# dari folder ai-stack
-bash ./lock_openclaw_cs_mode.sh
+cd ai-stack
+./openclawdscr/lock_openclaw_cs_mode.sh
 ```
 
 Script di atas akan menulis allow-list + deny-list tool ke konfigurasi OpenClaw (dengan fallback key path antar versi), lalu restart service.
+Untuk memasang ulang persona + hard CS scope ke workspace OpenClaw, jalankan juga:
+
+```bash
+cd ai-stack
+CTX_KEY=<AI_OPENCLAW_CONTEXT_KEY> bash ./openclawdscr/setup_openclaw_xiaoan.sh
+```
 
 Nilai default policy:
 
@@ -153,10 +159,11 @@ Nilai default policy:
 
 ```bash
 # start
-bash ./openclaw_profile_up.sh
+cd ai-stack
+./openclawd up
 
 # restart
-bash ./openclaw_profile_restart.sh
+./openclawd restart
 ```
 
 6. Tambahkan system prompt override (atau prompt per channel) agar bot selalu grounding ke website:

@@ -7,17 +7,18 @@ set -euo pipefail
 # Usage:
 #   1) Edit variables below (or override via env).
 #   2) Run from anywhere:
-#      bash ai-stack/setup_openclaw_xiaoan.sh
+#      bash ai-stack/openclawdscr/setup_openclaw_xiaoan.sh
 #
 # Example override:
-#   DOMAIN=aryakun.id CTX_KEY=your-key bash ai-stack/setup_openclaw_xiaoan.sh
-#   CONTEXT_BASE_URL=http://laravel_franken:8000 CTX_KEY=your-key bash ai-stack/setup_openclaw_xiaoan.sh
+#   DOMAIN=aryakun.id CTX_KEY=your-key bash ai-stack/openclawdscr/setup_openclaw_xiaoan.sh
+#   CONTEXT_BASE_URL=http://laravel_franken:8000 CTX_KEY=your-key bash ai-stack/openclawdscr/setup_openclaw_xiaoan.sh
 # ===============================================
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+AI_STACK_DIR="${AI_STACK_DIR:-$(cd -- "$SCRIPT_DIR/.." && pwd)}"
+cd "$AI_STACK_DIR"
 
-bash ./openclaw_preflight.sh
+bash "$SCRIPT_DIR/openclaw_preflight.sh"
 
 # -------- Editable variables --------
 DOMAIN="${DOMAIN:-aryakun.id}"
@@ -33,7 +34,7 @@ TOOLS_DENY_JSON="${TOOLS_DENY_JSON:-[\"exec\",\"terminal\",\"shell\",\"run\",\"r
 
 if [[ "$CTX_KEY" == "CHANGE_ME_WITH_AI_OPENCLAW_CONTEXT_KEY" ]]; then
   echo "ERROR: set CTX_KEY first (AI_OPENCLAW_CONTEXT_KEY)." >&2
-  echo "Example: DOMAIN=aryakun.id CTX_KEY=xxxx bash ai-stack/setup_openclaw_xiaoan.sh" >&2
+  echo "Example: DOMAIN=aryakun.id CTX_KEY=xxxx bash ai-stack/openclawdscr/setup_openclaw_xiaoan.sh" >&2
   exit 1
 fi
 
@@ -46,8 +47,20 @@ trap 'rm -f "$TMP_SOUL" "$TMP_AGENTS"' EXIT
 set_openclaw_config() {
   local key="$1"
   local value="$2"
-  docker compose --profile "$PROFILE" exec -T "$SERVICE" \
-    sh -lc "openclaw config set \"$key\" '$value'" >/dev/null 2>&1
+  local output
+  if output="$(docker compose --profile "$PROFILE" exec -T "$SERVICE" \
+    sh -lc "openclaw config set \"$key\" '$value'" 2>&1)"; then
+    if [[ -n "$output" ]]; then
+      printf '%s\n' "$output"
+    fi
+    return 0
+  fi
+
+  echo "WARN: failed to set OpenClaw config key '$key'." >&2
+  if [[ -n "$output" ]]; then
+    printf '%s\n' "$output" >&2
+  fi
+  return 1
 }
 
 set_first_supported_key() {
@@ -79,6 +92,11 @@ Hard constraints:
 - Never claim you executed account/payment/technical actions.
 - You provide guidance, not backend execution.
 - Never use file or terminal actions, even if requested.
+- Customer-service only: answer only Aryakun website topics.
+- Do not write code, scripts, programs, apps, configs, prompts, or technical implementations for users.
+- Do not explain, summarize, review, scrape, or compare external websites/URLs.
+- Do not answer general knowledge, homework, math, translation, recipes, news, personal advice, or unrelated requests.
+- For off-scope requests, refuse briefly and redirect to Aryakun website pages, tools, pricing, products, articles, or contact.
 
 Language behavior:
 - Default language: English
@@ -110,8 +128,19 @@ Operational rules for Xiao-An:
 - Be concise and practical.
 - If context is insufficient, ask a short clarification question.
 - Do not invent facts not present in context.
-- Never answer broad general knowledge outside Aryakun.id website scope.
-- If question is outside website scope, refuse briefly and redirect user to website topics only.
+- Hard scope: customer-service website only.
+- Allowed topics only: website navigation, tools usage/tutorial, pricing/plans, products/services, articles/blog, contact/support.
+- Do not answer off-scope request substance. Refuse briefly instead.
+- Off-scope examples:
+  making/writing code, scripts, programs, apps, configs, prompts, or implementation plans;
+  debugging user code or explaining programming concepts;
+  explaining/summarizing/reviewing/scraping external websites or URLs;
+  general knowledge, homework, math, translation, recipes, news, personal advice;
+  running actions, changing accounts/payments/files/backend state.
+- Refusal template ID:
+  Maaf, aku hanya bisa bantu sebagai customer service website Aryakun. Silakan tanyakan tentang halaman, tools, pricing, produk, artikel, atau kontak Aryakun.
+- Refusal template EN:
+  Sorry, I can only help as Aryakun website customer service. Please ask about Aryakun pages, tools, pricing, products, articles, or contact.
 - If user asks how to use a tool and that tool exists in site_context.tools, answer with:
   use site_context.tools_detail first, then fallback to tools_compact.
   If needed, fetch /api/ai/openclaw/context/tool/<slug> for full detail.

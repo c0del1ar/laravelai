@@ -1,0 +1,6 @@
+.env
+config/tools.json
+data/*
+!data/.gitkeep
+bin/*
+!bin/.gitkeep

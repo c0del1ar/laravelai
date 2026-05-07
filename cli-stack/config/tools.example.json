@@ -1,0 +1,29 @@
+{
+  "tools": {
+    "echo": {
+      "name": "Echo",
+      "description": "Development smoke-test tool. Returns the submitted text.",
+      "command": "tools/examples/echo.sh",
+      "args": ["{{text}}"],
+      "required": ["text"],
+      "patterns": {
+        "text": "^.{1,500}$"
+      },
+      "timeout_seconds": 5,
+      "max_output_bytes": 8192
+    },
+    "ytmp3": {
+      "name": "YouTube MP3 Downloader",
+      "description": "Placeholder for future downloader integration.",
+      "command": "tools/ytmp3",
+      "args": ["{{url}}"],
+      "required": ["url"],
+      "patterns": {
+        "url": "^https?://.+$"
+      },
+      "timeout_seconds": 180,
+      "max_output_bytes": 65536,
+      "output_json": true
+    }
+  }
+}

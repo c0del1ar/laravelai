@@ -2,9 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+AI_STACK_DIR="${AI_STACK_DIR:-$(cd -- "$SCRIPT_DIR/.." && pwd)}"
+cd "$AI_STACK_DIR"
 
-bash ./openclaw_preflight.sh
+bash "$SCRIPT_DIR/openclaw_preflight.sh"
 
 PROFILE="${PROFILE:-openclaw}"
 SERVICE="${SERVICE:-openclaw}"
@@ -14,8 +15,20 @@ TOOLS_DENY_JSON="${TOOLS_DENY_JSON:-[\"exec\",\"terminal\",\"shell\",\"run\",\"r
 set_openclaw_config() {
   local key="$1"
   local value="$2"
-  docker compose --profile "$PROFILE" exec -T "$SERVICE" \
-    sh -lc "openclaw config set \"$key\" '$value'" >/dev/null 2>&1
+  local output
+  if output="$(docker compose --profile "$PROFILE" exec -T "$SERVICE" \
+    sh -lc "openclaw config set \"$key\" '$value'" 2>&1)"; then
+    if [[ -n "$output" ]]; then
+      printf '%s\n' "$output"
+    fi
+    return 0
+  fi
+
+  echo "WARN: failed to set OpenClaw config key '$key'." >&2
+  if [[ -n "$output" ]]; then
+    printf '%s\n' "$output" >&2
+  fi
+  return 1
 }
 
 set_first_supported_key() {

@@ -1,0 +1,9 @@
+{
+  "id": "xiaoan-tool-runner",
+  "name": "Xiao-An Tool Runner",
+  "description": "Native /tool command router for OpenClaw that calls the cli-stack tool runner.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

@@ -2,9 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+AI_STACK_DIR="${AI_STACK_DIR:-$(cd -- "$SCRIPT_DIR/.." && pwd)}"
+cd "$AI_STACK_DIR"
 
-bash ./openclaw_preflight.sh
+bash "$SCRIPT_DIR/openclaw_preflight.sh"
 
 docker compose --profile openclaw up -d openclaw_init_permissions
 docker compose --profile openclaw restart openclaw

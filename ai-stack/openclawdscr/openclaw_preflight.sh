@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+AI_STACK_DIR="${AI_STACK_DIR:-$(cd -- "$SCRIPT_DIR/.." && pwd)}"
+cd "$AI_STACK_DIR"
 
 KEY="${OPENCLAW_WEBHOOK_KEY:-}"
 if [[ -z "$KEY" && -f ".env" ]]; then
