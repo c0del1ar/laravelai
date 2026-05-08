@@ -14,14 +14,14 @@
     },
     "ytmp3": {
       "name": "YouTube MP3 Downloader",
-      "description": "Placeholder for future downloader integration.",
-      "command": "tools/ytmp3",
+      "description": "Download YouTube audio as MP3.",
+      "command": "bin/ytmp3",
       "args": ["{{url}}"],
       "required": ["url"],
       "patterns": {
-        "url": "^https?://.+$"
+        "url": "^https?://(www\\.)?(youtube\\.com|youtu\\.be|music\\.youtube\\.com)/.+$"
       },
-      "timeout_seconds": 180,
+      "timeout_seconds": 300,
       "max_output_bytes": 65536,
       "output_json": true
     }

@@ -1,10 +1,13 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import fs from "node:fs/promises";
+import path from "node:path";
 
 const PLUGIN_ID = "xiaoan-tool-runner";
 const DEFAULT_PREFIX = "/tool";
 const DEFAULT_RUNNER_URL = "http://cli_tool_runner:37000";
 const DEFAULT_TIMEOUT_MS = 240_000;
 const MAX_REPLY_CHARS = 3000;
+const MEDIA_CACHE_DIR = "/tmp/openclaw/xiaoan-tool-runner";
 
 const trimTrailingSlash = (value) => String(value || "").replace(/\/+$/u, "");
 
@@ -149,6 +152,22 @@ const truncate = (value, max = MAX_REPLY_CHARS) => {
   return `${text.slice(0, max - 20).trim()}...\n[truncated]`;
 };
 
+const encodePathSegments = (value) =>
+  String(value || "")
+    .split("/")
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+
+const safeFileName = (value, fallback = "tool-output") => {
+  const name = path
+    .basename(String(value || fallback))
+    .replace(/[^\w.\-()[\] ]+/gu, "_")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return (name || fallback).slice(0, 180);
+};
+
 const formatToolList = (tools, prefix) => {
   if (!Array.isArray(tools) || tools.length === 0) {
     return `Belum ada tool yang tersedia.`;
@@ -163,7 +182,143 @@ const formatToolList = (tools, prefix) => {
   return [`Tool tersedia:`, ...lines].join("\n");
 };
 
-const formatRunResponse = (payload) => {
+const resolveFileMediaUrl = (file, runnerUrl) => {
+  const explicitUrl = String(file?.url || "").trim();
+  if (/^https?:\/\//iu.test(explicitUrl)) {
+    return explicitUrl;
+  }
+
+  const rawPath = String(file?.path || "").trim();
+  if (/^https?:\/\//iu.test(rawPath)) {
+    return rawPath;
+  }
+
+  const appPrefix = "/app/";
+  const relPath = rawPath.startsWith(appPrefix) ? rawPath.slice(appPrefix.length) : rawPath.replace(/^\/+/u, "");
+  if (!relPath.startsWith("data/")) {
+    return "";
+  }
+  return `${runnerUrl}/files/${encodePathSegments(relPath)}`;
+};
+
+const isWhatsAppVoiceFile = (file) => String(file?.variant || "").trim() === "whatsapp_voice";
+
+const documentNameRe = /\.(csv|doc|docx|json|md|pdf|ppt|pptx|rtf|txt|xls|xlsx|zip|rar|7z|mp3)$/iu;
+
+const isDocumentFile = (file) => {
+  const variant = String(file?.variant || "").trim();
+  const mime = String(file?.mime || "").trim().toLowerCase();
+  const name = String(file?.name || file?.path || "").trim();
+  if (variant === "download") {
+    return true;
+  }
+  if (mime === "audio/mpeg" || mime === "application/pdf" || mime === "application/octet-stream") {
+    return true;
+  }
+  if (mime.startsWith("text/")) {
+    return true;
+  }
+  if (mime.startsWith("application/vnd.openxmlformats-officedocument.")) {
+    return true;
+  }
+  if (mime.startsWith("application/vnd.ms-")) {
+    return true;
+  }
+  return documentNameRe.test(name);
+};
+
+const isLikelyProblematicWhatsAppAudio = (file) => {
+  const mime = String(file?.mime || "").trim().toLowerCase();
+  const name = String(file?.name || file?.path || "").trim().toLowerCase();
+  return mime === "audio/mpeg" || name.endsWith(".mp3");
+};
+
+const resolveRunFileSources = (payload, runnerUrl) => {
+  if (!payload?.ok || !Array.isArray(payload.files)) {
+    return [];
+  }
+  return payload.files
+    .slice(0, 10)
+    .map((file) => ({ file, url: resolveFileMediaUrl(file, runnerUrl) }))
+    .filter((source) => source.url);
+};
+
+const resolveRunDocumentSources = (payload, runnerUrl) => {
+  const sources = resolveRunFileSources(payload, runnerUrl).filter((source) => isDocumentFile(source.file));
+  const downloadSources = sources.filter((source) => String(source.file?.variant || "").trim() === "download");
+  return downloadSources.length > 0 ? downloadSources : sources;
+};
+
+const resolveRunMediaSources = (payload, runnerUrl) => {
+  const sources = resolveRunFileSources(payload, runnerUrl).filter((source) => !isDocumentFile(source.file));
+  const whatsappVoiceSources = sources.filter((source) => isWhatsAppVoiceFile(source.file));
+  if (whatsappVoiceSources.length > 0) {
+    return whatsappVoiceSources;
+  }
+  return sources.filter((source) => !isLikelyProblematicWhatsAppAudio(source.file));
+};
+
+const fetchMediaBuffer = async (url, timeoutMs) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`media fetch failed with status ${response.status}`);
+    }
+    return Buffer.from(await response.arrayBuffer());
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const cacheSources = async ({ sources, requestId, logger, label }) => {
+  if (sources.length === 0) {
+    return [];
+  }
+
+  await fs.mkdir(MEDIA_CACHE_DIR, { recursive: true, mode: 0o700 });
+  const cached = [];
+  for (let index = 0; index < sources.length; index += 1) {
+    const { file = {}, url: sourceUrl } = sources[index];
+    try {
+      const buffer = await fetchMediaBuffer(sourceUrl, 60_000);
+      const name = safeFileName(file.name || file.path, `tool-output-${index + 1}`);
+      const outputPath = path.join(MEDIA_CACHE_DIR, `${Date.now()}-${safeFileName(requestId || "request")}-${index}-${name}`);
+      await fs.writeFile(outputPath, buffer, { mode: 0o600 });
+      cached.push({ file, path: outputPath });
+    } catch (error) {
+      logger?.warn?.(`[${PLUGIN_ID}] ${label} cache failed url=${sourceUrl}: ${String(error)}`);
+    }
+  }
+  return cached;
+};
+
+const cacheRunMediaFiles = async ({ payload, runnerUrl, requestId, logger }) => {
+  const cached = await cacheSources({
+    sources: resolveRunMediaSources(payload, runnerUrl),
+    requestId,
+    logger,
+    label: "media",
+  });
+  return cached.map((entry) => entry.path);
+};
+
+const cacheRunDocuments = async ({ payload, runnerUrl, requestId, logger }) => {
+  const cached = await cacheSources({
+    sources: resolveRunDocumentSources(payload, runnerUrl),
+    requestId,
+    logger,
+    label: "document",
+  });
+  return cached.map(({ file, path: cachedPath }) => ({
+    url: cachedPath,
+    fileName: safeFileName(file.name || file.path || path.basename(cachedPath), path.basename(cachedPath)),
+    mimetype: String(file.mime || "").trim() || undefined,
+  }));
+};
+
+const formatRunResponse = (payload, options = {}) => {
   if (!payload || typeof payload !== "object") {
     return "Tool selesai, tapi response tidak valid.";
   }
@@ -182,7 +337,7 @@ const formatRunResponse = (payload) => {
     parts.push("Tool selesai.");
   }
 
-  if (Array.isArray(payload.files) && payload.files.length > 0) {
+  if (options.includeFileLines !== false && Array.isArray(payload.files) && payload.files.length > 0) {
     const fileLines = payload.files
       .slice(0, 10)
       .map((file) => {
@@ -195,6 +350,16 @@ const formatRunResponse = (payload) => {
   }
 
   return truncate(parts.filter(Boolean).join("\n"));
+};
+
+const buildRunReply = async ({ payload, runnerUrl, requestId, logger }) => {
+  const documents = await cacheRunDocuments({ payload, runnerUrl, requestId, logger });
+  const mediaUrls = documents.length === 0 ? await cacheRunMediaFiles({ payload, runnerUrl, requestId, logger }) : [];
+  const text = formatRunResponse(payload, { includeFileLines: documents.length === 0 && mediaUrls.length === 0 });
+  if (documents.length === 0 && mediaUrls.length === 0) {
+    return { text };
+  }
+  return { text, ...(documents.length > 0 ? { documents } : {}), ...(mediaUrls.length > 0 ? { mediaUrls } : {}) };
 };
 
 const fetchJSON = async ({ url, method = "GET", body, timeoutMs }) => {
@@ -310,7 +475,7 @@ export default definePluginEntry({
           `[${PLUGIN_ID}] run sender=${senderId} channel=${channelId} tool=${slug} request=${requestId || "-"}`,
         );
         const payload = await runTool({ tool: slug, args, requestId });
-        return { handled: true, reply: { text: formatRunResponse(payload) } };
+        return { handled: true, reply: await buildRunReply({ payload, runnerUrl, requestId, logger }) };
       } catch (error) {
         logger.warn(`[${PLUGIN_ID}] run failed sender=${senderId} channel=${channelId} tool=${slug}: ${String(error)}`);
         return { handled: true, reply: { text: "Tool gagal dijalankan. Coba lagi nanti atau cek format command." } };
@@ -323,6 +488,19 @@ export default definePluginEntry({
       }
 
       const message = extractInboundText(event);
+      if (!isToolCommand(message, prefix)) {
+        return undefined;
+      }
+
+      return await handleToolCommand({ message, event, ctx });
+    });
+
+    api.on("before_agent_reply", async (event, ctx) => {
+      if (!enabled) {
+        return undefined;
+      }
+
+      const message = String(event?.cleanedBody || "").trim() || extractInboundText(event);
       if (!isToolCommand(message, prefix)) {
         return undefined;
       }

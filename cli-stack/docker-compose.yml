@@ -10,10 +10,12 @@ services:
     environment:
       CLI_TOOL_RUNNER_ADDR: ${CLI_TOOL_RUNNER_ADDR:-:37000}
       CLI_TOOL_RUNNER_BASE_DIR: ${CLI_TOOL_RUNNER_BASE_DIR:-/app}
-      CLI_TOOL_RUNNER_CONFIG: ${CLI_TOOL_RUNNER_CONFIG:-/app/config/tools.json}
+      CLI_TOOL_RUNNER_CONFIG: ${CLI_TOOL_RUNNER_CONFIG:-/app/config/tools.example.json}
       CLI_TOOL_RUNNER_KEY: ${CLI_TOOL_RUNNER_KEY:-}
+      YTMP3_COOKIES_FILE: ${YTMP3_COOKIES_FILE:-/app/cookies/youtube.cookies.txt}
     volumes:
-      - ./config/tools.json:/app/config/tools.json:ro
+      - ./config:/app/config:ro
+      - ./cookies:/app/cookies
       - ./tools:/app/tools:ro
       - ./data:/app/data
     expose:

@@ -83,7 +83,12 @@ services:
       - openclaw_data:/home/node/.openclaw
 
   openclaw:
-    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
+    build:
+      context: .
+      dockerfile: openclaw.Dockerfile
+      args:
+        OPENCLAW_IMAGE: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
+    image: ${OPENCLAW_PATCHED_IMAGE:-aryakun/openclaw:document-reply}
     restart: unless-stopped
     profiles: ["openclaw"]
     env_file:

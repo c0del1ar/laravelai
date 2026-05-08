@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,6 +55,15 @@ type Server struct {
 	logger     *slog.Logger
 }
 
+type logContextKey string
+
+const requestLogContextKey logContextKey = "request-log"
+
+type requestLogFields struct {
+	Status int
+	Attrs  []slog.Attr
+}
+
 type RunRequest struct {
 	Tool      string            `json:"tool"`
 	Args      map[string]string `json:"args"`
@@ -79,9 +89,11 @@ type RunResponse struct {
 
 type FileResponse struct {
 	Path    string `json:"path"`
+	URL     string `json:"url,omitempty"`
 	Name    string `json:"name,omitempty"`
 	MIME    string `json:"mime,omitempty"`
 	Caption string `json:"caption,omitempty"`
+	Variant string `json:"variant,omitempty"`
 }
 
 type ToolPayload struct {
@@ -141,7 +153,17 @@ func main() {
 
 	cfg, err := loadConfig(configPath)
 	if err != nil {
-		fatal(logger, "load config", err)
+		fallbackPath := filepath.Join(filepath.Dir(configPath), "tools.example.json")
+		if configPath != fallbackPath {
+			logger.Warn("failed to load configured tool config; trying example fallback", "config", configPath, "fallback", fallbackPath, "error", err)
+			cfg, err = loadConfig(fallbackPath)
+			if err == nil {
+				configPath = fallbackPath
+			}
+		}
+		if err != nil {
+			fatal(logger, "load config", err)
+		}
 	}
 	if err := validateConfig(cfg); err != nil {
 		fatal(logger, "validate config", err)
@@ -158,6 +180,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.handleHealth)
 	mux.HandleFunc("GET /tools", server.handleTools)
+	mux.HandleFunc("GET /files/{path...}", server.handleFile)
 	mux.HandleFunc("POST /run", server.handleRun)
 
 	addr := env("CLI_TOOL_RUNNER_ADDR", defaultAddr)
@@ -221,6 +244,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(r) {
+		setRequestLog(r, http.StatusUnauthorized, slog.String("error", "unauthorized"))
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
@@ -235,38 +259,69 @@ func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Slug < items[j].Slug })
+	setRequestLog(r, http.StatusOK, slog.Int("tool_count", len(items)))
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(r) {
+		setRequestLog(r, http.StatusUnauthorized, slog.String("error", "unauthorized"))
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	absPath, err := s.resolveDataFilePath(r.PathValue("path"))
+	if err != nil {
+		setRequestLog(r, http.StatusBadRequest, slog.String("error", err.Error()))
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	info, err := os.Stat(absPath)
+	if err != nil || info.IsDir() {
+		setRequestLog(r, http.StatusNotFound, slog.String("error", "file not found"))
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	setRequestLog(r, http.StatusOK, slog.String("file", absPath))
+	http.ServeFile(w, r, absPath)
 }
 
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(r) {
+		setRequestLog(r, http.StatusUnauthorized, slog.String("error", "unauthorized"))
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
 
 	var req RunRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil {
+		setRequestLog(r, http.StatusBadRequest, slog.String("error", "invalid json"))
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
 
 	req.Tool = strings.ToLower(strings.TrimSpace(req.Tool))
 	if !slugRe.MatchString(req.Tool) {
+		setRequestLog(r, http.StatusBadRequest, slog.String("tool", req.Tool), slog.String("error", "invalid tool"))
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid tool"})
 		return
 	}
 
 	tool, ok := s.cfg.Tools[req.Tool]
 	if !ok {
+		setRequestLog(r, http.StatusNotFound, slog.String("tool", req.Tool), slog.String("error", "unknown tool"))
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown tool"})
 		return
 	}
 
-	response, status := s.runTool(r.Context(), req, tool)
+	response, status, attrs := s.runTool(r.Context(), req, tool)
+	s.attachFileURLs(r, &response)
+	setRequestLog(r, status, attrs...)
 	writeJSON(w, status, response)
 }
 
-func (s *Server) runTool(parent context.Context, req RunRequest, tool ToolConfig) (RunResponse, int) {
+func (s *Server) runTool(parent context.Context, req RunRequest, tool ToolConfig) (RunResponse, int, []slog.Attr) {
 	start := time.Now()
 	timeout := tool.TimeoutSeconds
 	if timeout <= 0 {
@@ -279,12 +334,20 @@ func (s *Server) runTool(parent context.Context, req RunRequest, tool ToolConfig
 
 	args, err := renderArgs(tool, req.Args)
 	if err != nil {
-		return RunResponse{OK: false, Tool: req.Tool, RequestID: req.RequestID, Error: err.Error()}, http.StatusBadRequest
+		return RunResponse{OK: false, Tool: req.Tool, RequestID: req.RequestID, Error: err.Error()}, http.StatusBadRequest, []slog.Attr{
+			slog.String("tool", req.Tool),
+			slog.String("request_id", req.RequestID),
+			slog.String("error", err.Error()),
+		}
 	}
 
 	workDir, command, err := s.resolveExecutionPaths(tool)
 	if err != nil {
-		return RunResponse{OK: false, Tool: req.Tool, RequestID: req.RequestID, Error: err.Error()}, http.StatusInternalServerError
+		return RunResponse{OK: false, Tool: req.Tool, RequestID: req.RequestID, Error: err.Error()}, http.StatusInternalServerError, []slog.Attr{
+			slog.String("tool", req.Tool),
+			slog.String("request_id", req.RequestID),
+			slog.String("error", err.Error()),
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(parent, time.Duration(timeout)*time.Second)
@@ -322,15 +385,28 @@ func (s *Server) runTool(parent context.Context, req RunRequest, tool ToolConfig
 		response.Stderr = strings.TrimSpace(stderr.String())
 	}
 
+	attrs := []slog.Attr{
+		slog.String("tool", req.Tool),
+		slog.String("request_id", req.RequestID),
+		slog.String("command", command),
+		slog.String("work_dir", workDir),
+		slog.Int("arg_count", len(args)),
+		slog.Int("exit_code", response.ExitCode),
+		slog.Bool("ok", response.OK),
+		slog.Bool("truncated", response.Truncated),
+	}
+
 	if ctx.Err() == context.DeadlineExceeded {
 		response.OK = false
 		response.Timeout = true
 		response.Error = "tool timeout"
-		return response, http.StatusGatewayTimeout
+		attrs = append(attrs, slog.Bool("timeout", true), slog.String("error", response.Error), slog.String("stderr", truncateLog(response.Stderr, 500)))
+		return response, http.StatusGatewayTimeout, attrs
 	}
 	if err != nil {
 		response.Error = "tool failed"
-		return response, http.StatusBadGateway
+		attrs = append(attrs, slog.String("error", err.Error()), slog.String("stderr", truncateLog(response.Stderr, 500)))
+		return response, http.StatusBadGateway, attrs
 	}
 
 	if tool.OutputJSON {
@@ -338,17 +414,19 @@ func (s *Server) runTool(parent context.Context, req RunRequest, tool ToolConfig
 		if parseErr := json.Unmarshal([]byte(response.Stdout), &payload); parseErr != nil {
 			response.OK = false
 			response.Error = "tool returned invalid json"
-			return response, http.StatusBadGateway
+			attrs = append(attrs, slog.String("error", parseErr.Error()), slog.String("stdout", truncateLog(response.Stdout, 500)))
+			return response, http.StatusBadGateway, attrs
 		}
 		response.Message = payload.Message
 		response.Files = payload.Files
 		response.Data = payload.Data
 		response.Stdout = ""
-		return response, http.StatusOK
+		attrs = append(attrs, slog.Int("file_count", len(response.Files)))
+		return response, http.StatusOK, attrs
 	}
 
 	response.Message = response.Stdout
-	return response, http.StatusOK
+	return response, http.StatusOK, attrs
 }
 
 func renderArgs(tool ToolConfig, values map[string]string) ([]string, error) {
@@ -429,6 +507,68 @@ func (s *Server) authorized(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(s.apiKey)) == 1
 }
 
+func (s *Server) attachFileURLs(r *http.Request, response *RunResponse) {
+	if response == nil || len(response.Files) == 0 {
+		return
+	}
+	for i := range response.Files {
+		if strings.TrimSpace(response.Files[i].URL) != "" {
+			continue
+		}
+		relPath, err := s.dataRelativePath(response.Files[i].Path)
+		if err != nil {
+			continue
+		}
+		response.Files[i].URL = fmt.Sprintf("http://%s/files/%s", r.Host, escapePathSegments(relPath))
+	}
+}
+
+func (s *Server) resolveDataFilePath(relPath string) (string, error) {
+	relPath = strings.TrimPrefix(strings.TrimSpace(relPath), "/")
+	if relPath == "" {
+		return "", errors.New("missing file path")
+	}
+	cleanRel := filepath.Clean(relPath)
+	if cleanRel == "." || cleanRel == ".." || strings.HasPrefix(cleanRel, ".."+string(os.PathSeparator)) || filepath.IsAbs(cleanRel) {
+		return "", errors.New("invalid file path")
+	}
+	absPath := filepath.Join(s.baseDir, cleanRel)
+	if _, err := s.dataRelativePath(absPath); err != nil {
+		return "", err
+	}
+	return absPath, nil
+}
+
+func (s *Server) dataRelativePath(filePath string) (string, error) {
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return "", errors.New("missing file path")
+	}
+	if !filepath.IsAbs(filePath) {
+		filePath = filepath.Join(s.baseDir, filePath)
+	}
+	absPath := filepath.Clean(filePath)
+
+	dataDir := filepath.Join(s.baseDir, "data")
+	relToData, err := filepath.Rel(dataDir, absPath)
+	if err != nil || relToData == "." || relToData == ".." || strings.HasPrefix(relToData, ".."+string(os.PathSeparator)) {
+		return "", errors.New("file path is outside data directory")
+	}
+	relToBase, err := filepath.Rel(s.baseDir, absPath)
+	if err != nil || relToBase == "." || relToBase == ".." || strings.HasPrefix(relToBase, ".."+string(os.PathSeparator)) {
+		return "", errors.New("file path is outside base directory")
+	}
+	return filepath.ToSlash(relToBase), nil
+}
+
+func escapePathSegments(value string) string {
+	parts := strings.Split(filepath.ToSlash(value), "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
+}
+
 func exitCode(err error) int {
 	if err == nil {
 		return 0
@@ -440,12 +580,64 @@ func exitCode(err error) int {
 	return -1
 }
 
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusRecorder) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusRecorder) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(p)
+}
+
 func requestLogMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
-		logger.Info("request", "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(start).Milliseconds())
+		fields := &requestLogFields{}
+		ctx := context.WithValue(r.Context(), requestLogContextKey, fields)
+		recorder := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(recorder, r.WithContext(ctx))
+
+		status := recorder.status
+		if status == 0 {
+			status = fields.Status
+		}
+		if status == 0 {
+			status = http.StatusOK
+		}
+
+		attrs := []slog.Attr{
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.Int("status", status),
+			slog.Int64("duration_ms", time.Since(start).Milliseconds()),
+		}
+		attrs = append(attrs, fields.Attrs...)
+
+		level := slog.LevelInfo
+		if status >= 500 {
+			level = slog.LevelError
+		} else if status >= 400 {
+			level = slog.LevelWarn
+		}
+		logger.LogAttrs(r.Context(), level, "request", attrs...)
 	})
+}
+
+func setRequestLog(r *http.Request, status int, attrs ...slog.Attr) {
+	fields, ok := r.Context().Value(requestLogContextKey).(*requestLogFields)
+	if !ok || fields == nil {
+		return
+	}
+	fields.Status = status
+	fields.Attrs = append(fields.Attrs, attrs...)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -459,6 +651,14 @@ func fallback(value string, fallbackValue string) string {
 		return fallbackValue
 	}
 	return value
+}
+
+func truncateLog(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= max {
+		return value
+	}
+	return value[:max] + "..."
 }
 
 func env(key string, fallbackValue string) string {

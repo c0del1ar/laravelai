@@ -17,7 +17,6 @@ WhatsApp -> OpenClaw plugin /tool -> http://cli_tool_runner:37000/run -> allowli
 ```bash
 cd cli-stack
 cp .env.example .env
-cp config/tools.example.json config/tools.json
 docker compose up -d --build
 ```
 
@@ -76,23 +75,47 @@ curl -sS -H "Content-Type: application/json" \
 
 Untuk integrasi OpenClaw internal, biarkan `CLI_TOOL_RUNNER_KEY` kosong karena plugin `/tool` tidak mengirim header auth. Batasi akses lewat Docker network internal. Jika service dipublish ke host/public network, pasang auth di layer reverse proxy atau firewall.
 
+## YouTube Cookies
+
+Beberapa video YouTube menolak request tanpa sesi login dan `yt-dlp` akan mengembalikan error seperti `Sign in to confirm you're not a bot`. Untuk kasus itu, export cookies browser dalam format Netscape, lalu simpan di:
+
+```text
+cli-stack/cookies/youtube.cookies.txt
+```
+
+File cookies tidak di-commit. Direktori `cookies` sengaja di-mount writable karena `yt-dlp --cookies` dapat memperbarui cookie jar saat proses selesai. Setelah file dibuat atau diperbarui:
+
+```bash
+docker compose up -d --build --force-recreate
+```
+
+Tool `ytmp3` akan menormalisasi cookie export yang memakai spasi menjadi format Netscape tab-separated sebelum dipakai oleh `yt-dlp`. Jika setelah rebuild masih muncul `Sign in to confirm you're not a bot`, cookies sudah tidak valid/stale dan perlu diexport ulang dari browser yang sedang login.
+
+Cookie yang valid untuk login YouTube biasanya memuat nama seperti `LOGIN_INFO`, `SID`, `SAPISID`, `__Secure-1PSID`, atau `__Secure-3PSID`. Jika file hanya berisi cookie visitor seperti `PREF`, `YSC`, `VISITOR_INFO1_LIVE`, dan token rollout, itu belum cukup untuk melewati validasi login.
+
+Default path di container:
+
+```env
+YTMP3_COOKIES_FILE=/app/cookies/youtube.cookies.txt
+```
+
 ## Menambah Tool
 
-Tambahkan executable di `tools/`, lalu daftarkan ke `config/tools.json`.
+Tambahkan executable di `tools/`, lalu daftarkan ke `config/tools.json` untuk konfigurasi custom. Jika `config/tools.json` belum ada, runner otomatis memakai `config/tools.example.json`.
 
 ### Menambah Tool Go
 
-Untuk tool yang ditulis dengan Go, simpan source di subdirektori sendiri, lalu build menjadi binary di `cli-stack/tools/`.
+Untuk tool yang ditulis dengan Go, simpan source di subdirektori sendiri, lalu build menjadi binary di `cli-stack/bin/`.
 
 Contoh struktur:
 
 ```text
 cli-stack/
+  bin/
+    ytmp3
   tools/
     ytmp3/
-      go.mod
       main.go
-    ytmp3
 ```
 
 Contoh `cli-stack/tools/ytmp3/main.go`:
@@ -126,10 +149,16 @@ Build binary:
 
 ```bash
 cd cli-stack/tools/ytmp3
-go build -o ../ytmp3 .
+go build -o ../../bin/ytmp3 .
 ```
 
-Daftarkan binary itu di `config/tools.json`:
+Daftarkan binary itu di `config/tools.json`. Mulai dari contoh bawaan:
+
+```bash
+cp config/tools.example.json config/tools.json
+```
+
+Lalu edit entry tool-nya:
 
 ```json
 {
@@ -137,13 +166,13 @@ Daftarkan binary itu di `config/tools.json`:
     "ytmp3": {
       "name": "YouTube MP3 Downloader",
       "description": "Download audio dari URL.",
-      "command": "tools/ytmp3",
+      "command": "bin/ytmp3",
       "args": ["{{url}}"],
       "required": ["url"],
       "patterns": {
-        "url": "^https?://.+$"
+        "url": "^https?://(www\\.)?(youtube\\.com|youtu\\.be|music\\.youtube\\.com)/.+$"
       },
-      "timeout_seconds": 180,
+      "timeout_seconds": 300,
       "max_output_bytes": 65536,
       "output_json": true
     }
@@ -163,28 +192,6 @@ Test langsung:
 curl -sS -H "Content-Type: application/json" \
   -d '{"tool":"ytmp3","args":{"url":"https://example.com/watch?v=test"}}' \
   http://localhost:37000/run
-```
-
-Contoh:
-
-```json
-{
-  "tools": {
-    "ytmp3": {
-      "name": "YouTube MP3 Downloader",
-      "description": "Download audio dari URL yang valid.",
-      "command": "tools/ytmp3",
-      "args": ["{{url}}"],
-      "required": ["url"],
-      "patterns": {
-        "url": "^https?://.+$"
-      },
-      "timeout_seconds": 180,
-      "max_output_bytes": 65536,
-      "output_json": true
-    }
-  }
-}
 ```
 
 Untuk `output_json: true`, executable harus print JSON:
