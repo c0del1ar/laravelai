@@ -223,7 +223,9 @@ Contoh response:
   - hanya merespons DM non-prefix dengan reminder sesuai cooldown
   - membisukan DM non-prefix selama masih dalam cooldown
   - tetap melewatkan DM prefix `/ia` ke AI normal
+  - menolak DM prefix `/ia` yang jelas di luar jobdesk CS website, misalnya request membuat program, membahas website eksternal, matematika, atau general knowledge
   - mengirim notif email owner saat reminder pertama per sender di luar cooldown
+- Scope gate plugin aktif default (`OPENCLAW_NATIVE_CS_SCOPE_GATE_ENABLED=true`). Set ke `false` hanya jika ingin kembali membiarkan model menangani semua pesan prefixed.
 - Laravel internal notify endpoint:
   - `POST /api/internal/ai/openclaw/owner-notify`
   - auth: header `X-Search-Key` (pakai `AI_INTERNAL_SEARCH_KEY`)

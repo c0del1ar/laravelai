@@ -7,6 +7,101 @@ const DEFAULT_PREFIX = "/ia";
 const DEFAULT_COOLDOWN_SECONDS = 60 * 60 * 7;
 const ENGLISH_HINT_RE =
   /\b(hi|hello|hey|please|how|what|where|when|why|can|could|would|help|price|pricing|contact|tool|use)\b/i;
+const WEBSITE_SCOPE_HINTS = [
+  "aryakun",
+  "website ini",
+  "web ini",
+  "site ini",
+  "situs ini",
+  "halaman",
+  "page",
+  "pages",
+  "tools",
+  "tool",
+  "pricing",
+  "harga",
+  "paket",
+  "plan",
+  "produk",
+  "product",
+  "layanan",
+  "service",
+  "artikel",
+  "article",
+  "blog",
+  "kontak",
+  "contact",
+  "support",
+  "wpbf",
+  "noredirect",
+  "no redirect",
+  "redirect checker",
+  "cipher",
+];
+const CODE_REQUEST_HINTS = [
+  "buatkan program",
+  "buat program",
+  "bikin program",
+  "buatkan script",
+  "bikin script",
+  "buatkan aplikasi",
+  "bikin aplikasi",
+  "buatkan kode",
+  "tulis kode",
+  "kode python",
+  "kode javascript",
+  "kode php",
+  "source code",
+  "write code",
+  "write a program",
+  "create a program",
+  "create an app",
+  "make me a script",
+  "generate code",
+  "debug kode",
+  "debug code",
+  "fix my code",
+  "perbaiki kode",
+  "implementasi teknis",
+  "implementation plan",
+];
+const EXTERNAL_SITE_STRONG_HINTS = [
+  "website lain",
+  "web lain",
+  "situs lain",
+  "external website",
+  "another website",
+];
+const EXTERNAL_SITE_GENERIC_HINTS = [
+  "jelaskan isi website",
+  "jelaskan isi web",
+  "rangkum website",
+  "ringkas website",
+  "review website",
+  "scrape website",
+  "summarize website",
+  "summarize this site",
+  "review this website",
+  "explain this website",
+];
+const GENERAL_TASK_HINTS = [
+  "berapa 2+2",
+  "hitung ",
+  "calculate ",
+  "translate ",
+  "terjemahkan ",
+  "resep ",
+  "recipe ",
+  "siapa presiden",
+  "who is the president",
+  "berita terbaru",
+  "latest news",
+  "apa itu ",
+  "explain ",
+  "jelaskan ",
+  "homework",
+  "pr ",
+];
 
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -46,6 +141,80 @@ const isLikelyEnglish = (text) => {
   }
   return asciiLetters / letters > 0.88;
 };
+
+const normalizeText = (text) =>
+  String(text || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}:/.+\-]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const hasAny = (text, markers) => markers.some((marker) => text.includes(marker));
+
+const hasWebsiteScopeText = (message) => {
+  const text = normalizeText(message);
+  return Boolean(text) && hasAny(text, WEBSITE_SCOPE_HINTS);
+};
+
+const containsExternalUrlRequest = (message) => {
+  const raw = String(message || "").trim();
+  if (!raw) {
+    return false;
+  }
+  const urls = raw.match(/https?:\/\/[^\s<>()]+|www\.[^\s<>()]+/gi) || [];
+  for (const value of urls) {
+    const candidate = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+    try {
+      const parsed = new URL(candidate);
+      if (!parsed.hostname.toLowerCase().includes("aryakun")) {
+        return true;
+      }
+    } catch {
+      return true;
+    }
+  }
+  return false;
+};
+
+const isOffscopeRequest = (message) => {
+  const text = normalizeText(message);
+  if (!text) {
+    return false;
+  }
+
+  if (containsExternalUrlRequest(message)) {
+    return true;
+  }
+  if (hasAny(text, EXTERNAL_SITE_STRONG_HINTS)) {
+    return true;
+  }
+  if (hasAny(text, EXTERNAL_SITE_GENERIC_HINTS) && !hasWebsiteScopeText(message)) {
+    return true;
+  }
+  if (/\b(buat|buatkan|bikin|membuat|membuatkan)\b.{0,40}\b(program|script|aplikasi|app|kode)\b/u.test(text)) {
+    return true;
+  }
+  if (/\b(write|create|make|generate)\b.{0,40}\b(code|program|script|app|application)\b/u.test(text)) {
+    return true;
+  }
+  if (hasAny(text, CODE_REQUEST_HINTS)) {
+    return true;
+  }
+
+  if (hasWebsiteScopeText(message)) {
+    return false;
+  }
+
+  if (/\b\d+\s*[+\-*/]\s*\d+\b/u.test(text)) {
+    return true;
+  }
+  return hasAny(text, GENERAL_TASK_HINTS);
+};
+
+const resolveOffscopeText = (message) =>
+  isLikelyEnglish(message)
+    ? "Sorry, I can only help as Aryakun website customer service. Please ask about Aryakun pages, tools, pricing, products, articles, or contact."
+    : "Maaf, aku hanya bisa bantu sebagai customer service website Aryakun. Silakan tanyakan tentang halaman, tools, pricing, produk, artikel, atau kontak Aryakun.";
 
 const stripRequiredPrefix = (message, prefix) => {
   const raw = String(message || "");
@@ -141,6 +310,7 @@ export default definePluginEntry({
       DEFAULT_COOLDOWN_SECONDS,
     );
     const enabled = parseBool(process.env.OPENCLAW_NATIVE_DM_GATE_ENABLED, true);
+    const csScopeGateEnabled = parseBool(process.env.OPENCLAW_NATIVE_CS_SCOPE_GATE_ENABLED, true);
 
     let loaded = false;
     let state = makeEmptyState();
@@ -221,6 +391,12 @@ export default definePluginEntry({
 
       const { prefixed, stripped } = stripRequiredPrefix(message, requiredPrefix);
       if (prefixed && stripped) {
+        if (csScopeGateEnabled && isOffscopeRequest(stripped)) {
+          logger.info(
+            `[${PLUGIN_ID}] gate phase=${phase} sender=${senderId} channel=${channelId} mode=reply reason=cs-offscope message="${safeMessagePreview(stripped)}"`,
+          );
+          return { handled: true, reply: { text: resolveOffscopeText(stripped) } };
+        }
         return undefined;
       }
 

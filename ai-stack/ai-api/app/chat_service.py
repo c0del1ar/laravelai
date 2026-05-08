@@ -190,6 +190,101 @@ _EXECUTION_CLAIM_HINTS = [
     "i can execute",
     "i can process that for you",
 ]
+_WEBSITE_SCOPE_HINTS = [
+    "aryakun",
+    "website ini",
+    "web ini",
+    "site ini",
+    "situs ini",
+    "halaman",
+    "page",
+    "pages",
+    "tools",
+    "tool",
+    "pricing",
+    "harga",
+    "paket",
+    "plan",
+    "produk",
+    "product",
+    "layanan",
+    "service",
+    "artikel",
+    "article",
+    "blog",
+    "kontak",
+    "contact",
+    "support",
+    "wpbf",
+    "noredirect",
+    "no redirect",
+    "redirect checker",
+    "cipher",
+]
+_CODE_REQUEST_HINTS = [
+    "buatkan program",
+    "buat program",
+    "bikin program",
+    "buatkan script",
+    "bikin script",
+    "buatkan aplikasi",
+    "bikin aplikasi",
+    "buatkan kode",
+    "tulis kode",
+    "kode python",
+    "kode javascript",
+    "kode php",
+    "source code",
+    "write code",
+    "write a program",
+    "create a program",
+    "create an app",
+    "make me a script",
+    "generate code",
+    "debug kode",
+    "debug code",
+    "fix my code",
+    "perbaiki kode",
+    "implementasi teknis",
+    "implementation plan",
+]
+_EXTERNAL_SITE_STRONG_HINTS = [
+    "website lain",
+    "web lain",
+    "situs lain",
+    "external website",
+    "another website",
+]
+_EXTERNAL_SITE_GENERIC_HINTS = [
+    "jelaskan isi website",
+    "jelaskan isi web",
+    "rangkum website",
+    "ringkas website",
+    "review website",
+    "scrape website",
+    "summarize website",
+    "summarize this site",
+    "review this website",
+    "explain this website",
+]
+_GENERAL_TASK_HINTS = [
+    "berapa 2+2",
+    "hitung ",
+    "calculate ",
+    "translate ",
+    "terjemahkan ",
+    "resep ",
+    "recipe ",
+    "siapa presiden",
+    "who is the president",
+    "berita terbaru",
+    "latest news",
+    "apa itu ",
+    "explain ",
+    "jelaskan ",
+    "homework",
+    "pr ",
+]
 
 
 def _path_part(url: str) -> str:
@@ -218,6 +313,61 @@ def _infer_execution_target(message: str, tutorial_mode: bool) -> str:
     if tutorial_mode or any(marker in text for marker in _TOOL_HINTS):
         return "tool"
     return "general"
+
+
+def _has_website_scope_text(message: str) -> bool:
+    text = normalize_text(message)
+    if not text:
+        return False
+    return any(marker in text for marker in _WEBSITE_SCOPE_HINTS)
+
+
+def _contains_external_url_request(message: str) -> bool:
+    raw = str(message or "").strip()
+    if not raw:
+        return False
+
+    urls = re.findall(r"https?://[^\s<>()]+|www\.[^\s<>()]+", raw, flags=re.IGNORECASE)
+    if not urls:
+        return False
+
+    for url in urls:
+        candidate = url if url.lower().startswith(("http://", "https://")) else f"https://{url}"
+        host = (urlparse(candidate).netloc or "").lower()
+        if "aryakun" not in host:
+            return True
+    return False
+
+
+def _looks_like_offscope_request(message: str, intent_profile: Dict[str, Any]) -> bool:
+    text = normalize_text(message)
+    if not text:
+        return False
+
+    tutorial_mode = bool(intent_profile.get("tutorial_mode", False))
+    tool_slug_hint = str(intent_profile.get("tool_slug_hint", "")).strip()
+    if tutorial_mode and (tool_slug_hint or any(marker in text for marker in _TOOL_HINTS)):
+        return False
+
+    if _contains_external_url_request(message):
+        return True
+    if any(marker in text for marker in _EXTERNAL_SITE_STRONG_HINTS):
+        return True
+    if any(marker in text for marker in _EXTERNAL_SITE_GENERIC_HINTS) and not _has_website_scope_text(message):
+        return True
+    if re.search(r"\b(buat|buatkan|bikin|membuat|membuatkan)\b.{0,40}\b(program|script|aplikasi|app|kode)\b", text):
+        return True
+    if re.search(r"\b(write|create|make|generate)\b.{0,40}\b(code|program|script|app|application)\b", text):
+        return True
+    if any(marker in text for marker in _CODE_REQUEST_HINTS):
+        return True
+
+    if _has_website_scope_text(message):
+        return False
+
+    if re.search(r"\b\d+\s*[\+\-\*/]\s*\d+\b", text):
+        return True
+    return any(marker in text for marker in _GENERAL_TASK_HINTS)
 
 
 def _has_website_scope_signal(
@@ -854,6 +1004,24 @@ async def generate_chat_response(
         result = apply_channel_guardrails(result, channel)
         await memory_store.add_turn(user_id or "", channel, message, str(result.get("answer", "")))
         await _record(True, 0.96, 0, "handoff keyword", intent="handoff", variant=experiment_variant, handoff=True)
+        return result
+
+    if CS_ONLY_MODE and _looks_like_offscope_request(message, intent_profile):
+        result = {
+            "answer": _website_scope_only_answer(language),
+            "recommended_type": "none",
+            "recommended_url": "",
+            "reason": "cs-only off-scope request blocked before retrieval",
+            "related_items": [],
+            "sources": [],
+            "confidence_score": 0.94,
+            "intent_mode": "offscope",
+            "experiment_variant": experiment_variant,
+            "experiment_model": experiment_model,
+        }
+        result = apply_channel_guardrails(result, channel)
+        await memory_store.add_turn(user_id or "", channel, message, str(result.get("answer", "")))
+        await _record(True, 0.94, 0, str(result.get("reason", "")), intent="offscope", variant=experiment_variant)
         return result
 
     if CS_ONLY_MODE and execution_requested:
